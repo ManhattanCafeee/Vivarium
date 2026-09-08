@@ -1,0 +1,5 @@
+error: #[derive(Entity)] found more than one id candidate: a field marked #[entity(id)] and a field named `id`; keep exactly one
+ --> tests/ui/fail/ambiguous_id.rs:5:8
+  |
+5 | struct User {
+  |        ^^^^

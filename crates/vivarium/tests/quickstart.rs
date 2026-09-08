@@ -4,10 +4,10 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::{Router, routing::get, routing::post};
+use garde::Validate;
 use http_body_util::BodyExt;
 use serde::Deserialize;
 use tower::ServiceExt;
-use validator::Validate;
 use vivarium::sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use vivarium::{ApiError, Initializer, Varser, create};
 
@@ -20,7 +20,7 @@ struct User {
 
 #[derive(Deserialize, Validate)]
 struct NewUser {
-    #[validate(length(min = 1, max = 100))]
+    #[garde(length(chars, min = 1, max = 100))]
     name: String,
 }
 

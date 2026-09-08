@@ -2,16 +2,20 @@
 //!
 //! The [`Varser`] family wraps axum's native extractors and adds two steps on
 //! top of deserialization: [`Initializer`] (a post-deserialization hook) and
-//! [`validator::Validate`]. For extraction without these extra steps, use the
+//! [`garde::Validate`]. For extraction without these extra steps, use the
 //! plain axum [`axum::Json`], [`Query`],
 //! [`Path`] or [`Form`] extractors.
+//!
+//! Validation uses garde's default context: the associated
+//! [`garde::Validate::Context`] type must implement `Default` (derived types
+//! always do; custom `#[garde(context(...))]` types are not supported).
 
 use axum::body::Bytes;
 use axum::extract::{Form, FromRequest, FromRequestParts, Path, Query, Request};
 use axum::http::HeaderMap;
 use axum::http::header;
+use garde::Validate;
 use serde::de::DeserializeOwned;
-use validator::Validate;
 
 use crate::error::ApiError;
 
@@ -30,11 +34,19 @@ pub trait Initializer {
 }
 
 /// Runs the shared [`Initializer`] + [`Validate`] pipeline tail.
-fn initialize_and_validate<T: Validate + Initializer>(mut value: T) -> Result<T, ApiError> {
+fn initialize_and_validate<T: Validate + Initializer>(mut value: T) -> Result<T, ApiError>
+where
+    T::Context: Default,
+{
     value.try_initialize()?;
-    value
-        .validate()
-        .map_err(|err| ApiError::Validation(err.to_string()))?;
+    value.validate().map_err(|err| {
+        let message = err
+            .iter()
+            .map(|(path, error)| format!("[{path}]: [{error}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        ApiError::Validation(message)
+    })?;
     Ok(value)
 }
 
@@ -47,6 +59,7 @@ impl<S, T> FromRequest<S> for Varser<T>
 where
     S: Send + Sync,
     T: DeserializeOwned + Validate + Initializer + Send + Sync,
+    T::Context: Default,
 {
     type Rejection = ApiError;
 
@@ -69,6 +82,7 @@ impl<S, T> FromRequest<S> for QueryVarser<T>
 where
     S: Send + Sync,
     T: DeserializeOwned + Validate + Initializer + Send + Sync,
+    T::Context: Default,
 {
     type Rejection = ApiError;
 
@@ -91,6 +105,7 @@ impl<S, T> FromRequest<S> for PathVarser<T>
 where
     S: Send + Sync,
     T: DeserializeOwned + Validate + Initializer + Send + Sync,
+    T::Context: Default,
 {
     type Rejection = ApiError;
 
@@ -113,6 +128,7 @@ impl<S, T> FromRequest<S> for FormVarser<T>
 where
     S: Send + Sync,
     T: DeserializeOwned + Validate + Initializer + Send + Sync,
+    T::Context: Default,
 {
     type Rejection = ApiError;
 
@@ -145,7 +161,6 @@ mod tests {
     use http_body_util::BodyExt;
     use serde::Deserialize;
     use tower::ServiceExt;
-    use validator::Validate;
 
     async fn drive(app: Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
         let response = app.oneshot(req).await.expect("request succeeds");
@@ -160,9 +175,9 @@ mod tests {
         (status, value)
     }
 
-    #[derive(Debug, Deserialize, Validate)]
+    #[derive(Debug, Deserialize, garde::Validate)]
     struct Credentials {
-        #[validate(required, email)]
+        #[garde(required, email)]
         email: Option<String>,
     }
 
@@ -212,18 +227,14 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         let message = body["message"].as_str().expect("message is a string");
         assert!(
-            message.contains("email"),
-            "message should name the field: {message}"
-        );
-        assert!(
-            message.contains("required"),
-            "message should name the rule: {message}"
+            message.starts_with("[email]: [") && message.ends_with(']'),
+            "message should be Go-style `[field]: [rule]`: {message}"
         );
     }
 
-    #[derive(Debug, Deserialize, Validate)]
+    #[derive(Debug, Deserialize, garde::Validate)]
     struct InitRejected {
-        #[validate(length(min = 1))]
+        #[garde(length(min = 1))]
         value: String,
     }
 
@@ -251,9 +262,9 @@ mod tests {
         assert_eq!(body["message"], "init rejected");
     }
 
-    #[derive(Debug, Deserialize, Validate)]
+    #[derive(Debug, Deserialize, garde::Validate)]
     struct Search {
-        #[validate(length(min = 1))]
+        #[garde(length(min = 1))]
         q: String,
     }
 
@@ -282,9 +293,9 @@ mod tests {
         assert!(body["message"].as_str().unwrap_or("").contains("q"));
     }
 
-    #[derive(Debug, Deserialize, Validate)]
+    #[derive(Debug, Deserialize, garde::Validate)]
     struct IdParam {
-        #[validate(range(min = 0))]
+        #[garde(range(min = 0))]
         id: u32,
     }
 
@@ -309,9 +320,9 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
-    #[derive(Debug, Deserialize, Validate)]
+    #[derive(Debug, Deserialize, garde::Validate)]
     struct FormBody {
-        #[validate(length(min = 1))]
+        #[garde(length(min = 1))]
         name: String,
     }
 

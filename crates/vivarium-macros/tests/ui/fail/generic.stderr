@@ -1,0 +1,5 @@
+error: #[derive(Entity)] does not support generic structs
+ --> tests/ui/fail/generic.rs:5:13
+  |
+5 | struct Boxed<T> {
+  |             ^^^

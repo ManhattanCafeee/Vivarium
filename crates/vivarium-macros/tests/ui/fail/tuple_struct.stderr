@@ -1,0 +1,5 @@
+error: #[derive(Entity)] requires a struct with named fields
+ --> tests/ui/fail/tuple_struct.rs:5:12
+  |
+5 | struct Pair(i64, String);
+  |            ^^^^^^^^^^^^^

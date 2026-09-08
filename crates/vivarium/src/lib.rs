@@ -21,7 +21,7 @@
 //! ```no_run
 //! use axum::{Router, routing::post};
 //! use serde::{Deserialize, Serialize};
-//! use validator::Validate;
+//! use garde::Validate;
 //! use vivarium::{ApiError, Order, Query, Sorter, Varser, create};
 //! use vivarium::sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 //!
@@ -46,7 +46,7 @@
 //!
 //! #[derive(Deserialize, Validate)]
 //! struct NewUser {
-//!     #[validate(length(min = 1, max = 100))]
+//!     #[garde(length(chars, min = 1, max = 100))]
 //!     name: String,
 //! }
 //!

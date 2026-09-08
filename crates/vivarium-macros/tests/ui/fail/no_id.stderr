@@ -1,0 +1,5 @@
+error: #[derive(Entity)] needs an id field: mark one with #[entity(id)], or name a field `id`
+ --> tests/ui/fail/no_id.rs:5:8
+  |
+5 | struct User {
+  |        ^^^^

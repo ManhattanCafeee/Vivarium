@@ -28,6 +28,10 @@ pub enum ApiError {
     BadRequest(String),
 
     /// The request payload failed deserialization or validation.
+    ///
+    /// The message is a human-readable, space-separated list of
+    /// `[field]: [rule]` entries (e.g. `[email]: [not set]`); the `code`
+    /// field, not the message, is the machine contract.
     #[error("{0}")]
     Validation(String),
 

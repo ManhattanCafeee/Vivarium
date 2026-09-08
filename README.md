@@ -27,7 +27,7 @@ axum = "0.8"
 sqlx = { version = "0.8", features = ["sqlite"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
-validator = { version = "0.20", features = ["derive"] }
+garde = { version = "0.22", features = ["derive"] }
 ```
 
 ### 1. A sqlite + axum service
@@ -35,7 +35,7 @@ validator = { version = "0.20", features = ["derive"] }
 ```rust,no_run
 use axum::{Router, routing::post};
 use serde::Deserialize;
-use validator::Validate;
+use garde::Validate;
 use vivarium::{ApiError, Initializer, Varser, create};
 use vivarium::sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
@@ -48,7 +48,7 @@ struct User {
 
 #[derive(Deserialize, Validate)]
 struct NewUser {
-    #[validate(length(min = 1, max = 100))]
+    #[garde(length(chars, min = 1, max = 100))]
     name: String,
 }
 
@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-Invalid bodies get `422 {"code":"VALIDATION","message":"[name]: [validation.length]"}`.
+Invalid bodies get `422 {"code":"VALIDATION","message":"[name]: [length is lower than 1]"}`.
 
 ### 2. Chainable queries
 
@@ -149,7 +149,7 @@ let cfg = config.get();           // lock-free Arc read
 
 ```
 HTTP/1.1 422 Unprocessable Entity
-{"code":"VALIDATION","message":"[name]: [validation.length]"}
+{"code":"VALIDATION","message":"[name]: [length is lower than 1]"}
 ```
 
 Internal details stay server-side: `ApiError::Internal { system }` only
