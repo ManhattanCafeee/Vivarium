@@ -14,6 +14,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
+repository = "https://github.com/ManhattanCafeee/Vivarium"
 authors = ["Vivarium contributors"]
 description = "Type-safe ergonomics on top of sqlx and axum: pagination, sorting whitelists, unified errors, validation extractors, and hot-reloadable config."
 
