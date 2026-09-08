@@ -9,6 +9,7 @@
 //! use sqlx::sqlite::SqlitePool;
 //!
 //! #[derive(Clone, sqlx::FromRow, vivarium_db::Entity)]
+//! #[entity(crate = "vivarium_db")]
 //! struct User {
 //!     id: i64,
 //!     name: String,

@@ -7,7 +7,7 @@ use sqlx::postgres::PgPoolOptions;
 use vivarium_db::{Order, Pagination, Query, Sorter, create, delete, find_by_id, update_by_id};
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, vivarium_db::Entity)]
-#[entity(table = "vivarium_users")]
+#[entity(table = "vivarium_users", crate = "vivarium_db")]
 struct User {
     id: i64,
     name: String,

@@ -2,6 +2,7 @@
 use vivarium_core::Entity;
 
 #[derive(vivarium_macros::Entity)]
+#[entity(crate = "vivarium_core")]
 struct UserProfile {
     id: i64,
     name: String,

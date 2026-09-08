@@ -6,7 +6,7 @@ use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use vivarium_db::{count, create, delete, exists, find_by_id, update_by_id};
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, vivarium_db::Entity)]
-#[entity(table = "users")]
+#[entity(table = "users", crate = "vivarium_db")]
 struct User {
     id: i64,
     name: String,

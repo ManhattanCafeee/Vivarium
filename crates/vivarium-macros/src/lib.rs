@@ -12,6 +12,12 @@
 //!
 //! - `#[entity(table = "name")]` (struct): override the table name. Defaults
 //!   to the snake_case form of the struct name.
+//! - `#[entity(crate = "path")]` (struct): override the crate path the
+//!   generated code anchors on (the `Entity` trait and `Value` type).
+//!   Defaults to `::vivarium_rs` (the facade). Set it to
+//!   `"vivarium_db"` when using the derive through `vivarium-db` without the
+//!   facade, or to `"vivarium_core"` when depending on the lower-level
+//!   crates directly.
 //! - `#[entity(id)]` (field): mark the primary-key field. Defaults to the
 //!   field named `id`. Must be `i64`.
 //! - `#[entity(rename = "col")]` (field): override the column name. Defaults
@@ -28,7 +34,7 @@
 //! use vivarium_core::Entity;
 //!
 //! #[derive(vivarium_macros::Entity)]
-//! #[entity(table = "users")]
+//! #[entity(table = "users", crate = "vivarium_core")]
 //! struct User {
 //!     id: i64,
 //!     name: String,
@@ -105,6 +111,19 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
         Some(lit) => lit.clone(),
         None => LitStr::new(&to_snake_case(&name.to_string()), name.span()),
     };
+    let anchor_str = struct_attrs
+        .crate_path
+        .as_ref()
+        .map_or_else(|| "::vivarium_rs".to_owned(), |lit| lit.value());
+    let anchor: syn::Path = syn::parse_str(&anchor_str).map_err(|_| {
+        Error::new_spanned(
+            struct_attrs
+                .crate_path
+                .as_ref()
+                .expect("crate attr present"),
+            format!("invalid path in `#[entity(crate = ...)]`: {anchor_str}"),
+        )
+    })?;
 
     let (id_field, id_col_lit): (&syn::Field, LitStr) = {
         let marked: Vec<&syn::Field> = fields
@@ -167,6 +186,7 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
             field,
             &quote!(self.#ident),
             field_attr(field, "json").is_some(),
+            &anchor,
         )?;
         column_pushes.push(quote! {
             out.push((#col_lit, #value));
@@ -174,7 +194,7 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
     }
 
     Ok(quote! {
-        impl ::vivarium_core::Entity for #name {
+        impl #anchor::Entity for #name {
             const TABLE: &'static str = #table;
             const ID_COLUMN: &'static str = #id_col_lit;
 
@@ -182,7 +202,7 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
                 self.#id_ident
             }
 
-            fn columns_and_values(&self) -> Vec<(&'static str, ::vivarium_core::Value)> {
+            fn columns_and_values(&self) -> Vec<(&'static str, #anchor::Value)> {
                 let mut out = ::std::vec::Vec::new();
                 #(#column_pushes)*
                 out
@@ -196,10 +216,11 @@ fn value_expr(
     field: &syn::Field,
     access: &proc_macro2::TokenStream,
     json: bool,
+    anchor: &syn::Path,
 ) -> Result<proc_macro2::TokenStream> {
     if json {
         return Ok(quote! {
-            ::vivarium_core::Value::Json(
+            #anchor::Value::Json(
                 ::serde_json::to_value(#access)
                     .expect("field marked #[entity(json)] must serialize to JSON")
             )
@@ -207,7 +228,7 @@ fn value_expr(
     }
     let ty = &field.ty;
     if type_is(ty, &["i64"]) {
-        Ok(quote!(::vivarium_core::Value::I64(#access)))
+        Ok(quote!(#anchor::Value::I64(#access)))
     } else if type_is(ty, &["i8"])
         || type_is(ty, &["i16"])
         || type_is(ty, &["i32"])
@@ -218,19 +239,19 @@ fn value_expr(
         || type_is(ty, &["usize"])
         || type_is(ty, &["isize"])
     {
-        Ok(quote!(::vivarium_core::Value::I64(#access as i64)))
+        Ok(quote!(#anchor::Value::I64(#access as i64)))
     } else if type_is(ty, &["f64"]) {
-        Ok(quote!(::vivarium_core::Value::F64(#access)))
+        Ok(quote!(#anchor::Value::F64(#access)))
     } else if type_is(ty, &["f32"]) {
-        Ok(quote!(::vivarium_core::Value::F64(#access as f64)))
+        Ok(quote!(#anchor::Value::F64(#access as f64)))
     } else if type_is(ty, &["bool"]) {
-        Ok(quote!(::vivarium_core::Value::Bool(#access)))
+        Ok(quote!(#anchor::Value::Bool(#access)))
     } else if type_is(ty, &["String"]) {
-        Ok(quote!(::vivarium_core::Value::Text(#access.clone())))
+        Ok(quote!(#anchor::Value::Text(#access.clone())))
     } else if type_is(ty, &["Vec", "u8"]) {
-        Ok(quote!(::vivarium_core::Value::Bytes(#access.clone())))
+        Ok(quote!(#anchor::Value::Bytes(#access.clone())))
     } else if type_is(ty, &["serde_json", "Value"]) || single_ident(ty, "Value") {
-        Ok(quote!(::vivarium_core::Value::Json(
+        Ok(quote!(#anchor::Value::Json(
             ::serde_json::to_value(&#access)
                 .expect("JSON value fields must serialize to JSON")
         )))
@@ -239,11 +260,11 @@ fn value_expr(
             if segment.ident == "Option" {
                 if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                     if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                        let inner_expr = value_expr_inner(inner, &quote!(v))?;
+                        let inner_expr = value_expr_inner(inner, &quote!(v), anchor)?;
                         return Ok(quote! {
                             match &#access {
                                 ::core::option::Option::Some(v) => #inner_expr,
-                                ::core::option::Option::None => ::vivarium_core::Value::Null,
+                                ::core::option::Option::None => #anchor::Value::Null,
                             }
                         });
                     }
@@ -271,9 +292,10 @@ fn value_expr(
 fn value_expr_inner(
     ty: &Type,
     access: &proc_macro2::TokenStream,
+    anchor: &syn::Path,
 ) -> Result<proc_macro2::TokenStream> {
     if type_is(ty, &["i64"]) {
-        Ok(quote!(::vivarium_core::Value::I64(*#access)))
+        Ok(quote!(#anchor::Value::I64(*#access)))
     } else if type_is(ty, &["i8"])
         || type_is(ty, &["i16"])
         || type_is(ty, &["i32"])
@@ -284,19 +306,19 @@ fn value_expr_inner(
         || type_is(ty, &["usize"])
         || type_is(ty, &["isize"])
     {
-        Ok(quote!(::vivarium_core::Value::I64(*#access as i64)))
+        Ok(quote!(#anchor::Value::I64(*#access as i64)))
     } else if type_is(ty, &["f64"]) {
-        Ok(quote!(::vivarium_core::Value::F64(*#access)))
+        Ok(quote!(#anchor::Value::F64(*#access)))
     } else if type_is(ty, &["f32"]) {
-        Ok(quote!(::vivarium_core::Value::F64(*#access as f64)))
+        Ok(quote!(#anchor::Value::F64(*#access as f64)))
     } else if type_is(ty, &["bool"]) {
-        Ok(quote!(::vivarium_core::Value::Bool(*#access)))
+        Ok(quote!(#anchor::Value::Bool(*#access)))
     } else if type_is(ty, &["String"]) {
-        Ok(quote!(::vivarium_core::Value::Text((#access).clone())))
+        Ok(quote!(#anchor::Value::Text((#access).clone())))
     } else if type_is(ty, &["Vec", "u8"]) {
-        Ok(quote!(::vivarium_core::Value::Bytes((#access).clone())))
+        Ok(quote!(#anchor::Value::Bytes((#access).clone())))
     } else if type_is(ty, &["serde_json", "Value"]) || single_ident(ty, "Value") {
-        Ok(quote!(::vivarium_core::Value::Json(
+        Ok(quote!(#anchor::Value::Json(
             ::serde_json::to_value(#access).expect("JSON value fields must serialize to JSON")
         )))
     } else {
@@ -312,11 +334,13 @@ fn value_expr_inner(
 /// Struct-level `#[entity(...)]` attributes.
 struct EntityAttrs {
     table: Option<LitStr>,
+    crate_path: Option<LitStr>,
 }
 
 impl EntityAttrs {
     fn parse(attrs: &[Attribute]) -> Result<Self> {
         let mut table = None;
+        let mut crate_path = None;
         for attr in attrs {
             if !attr.path().is_ident("entity") {
                 continue;
@@ -326,12 +350,16 @@ impl EntityAttrs {
                     let lit: LitStr = meta.value()?.parse()?;
                     table = Some(lit);
                     Ok(())
+                } else if meta.path.is_ident("crate") {
+                    let lit: LitStr = meta.value()?.parse()?;
+                    crate_path = Some(lit);
+                    Ok(())
                 } else {
-                    Err(meta.error("unknown #[entity] attribute; expected `table = \"...\"`"))
+                    Err(meta.error("unknown #[entity] attribute; expected `table = \"...\"` or `crate = \"...\"`"))
                 }
             })?;
         }
-        Ok(Self { table })
+        Ok(Self { table, crate_path })
     }
 }
 

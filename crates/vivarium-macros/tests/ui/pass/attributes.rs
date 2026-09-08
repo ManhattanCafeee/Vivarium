@@ -3,7 +3,7 @@ use serde_json::Value;
 use vivarium_core::Entity;
 
 #[derive(vivarium_macros::Entity)]
-#[entity(table = "accounts")]
+#[entity(table = "accounts", crate = "vivarium_core")]
 struct Account {
     #[entity(id)]
     account_id: i64,

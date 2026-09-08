@@ -8,7 +8,7 @@ use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use vivarium_db::{Column, Order, Pagination, Query, Sorter, create};
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, vivarium_db::Entity)]
-#[entity(table = "users")]
+#[entity(table = "users", crate = "vivarium_db")]
 struct User {
     id: i64,
     name: String,

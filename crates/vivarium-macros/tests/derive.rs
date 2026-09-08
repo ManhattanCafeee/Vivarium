@@ -3,7 +3,7 @@ use serde_json::Value;
 use vivarium_core::Entity;
 
 #[derive(vivarium_macros::Entity)]
-#[entity(table = "accounts")]
+#[entity(table = "accounts", crate = "vivarium_core")]
 struct Account {
     #[entity(id)]
     account_id: i64,
@@ -49,6 +49,7 @@ fn columns_and_values_skip_id_and_skipped_fields() {
 }
 
 #[derive(vivarium_macros::Entity)]
+#[entity(crate = "vivarium_core")]
 struct User {
     id: i64,
     name: String,
@@ -67,7 +68,7 @@ fn default_table_is_snake_case_and_default_id_field() {
 }
 
 #[derive(vivarium_macros::Entity)]
-#[entity(table = "customers")]
+#[entity(table = "customers", crate = "vivarium_core")]
 struct CamelCaseCustomer {
     id: i64,
     display_name: String,
