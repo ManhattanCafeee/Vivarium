@@ -177,6 +177,23 @@ async fn paginate_normalizes_out_of_range_sizes() {
 }
 
 #[tokio::test]
+async fn paginate_replaces_query_limit_offset() {
+    let pool = pool().await;
+    seed(&pool, 10).await;
+
+    // The query's own limit/offset are replaced by the pagination's; a
+    // stale duplicate LIMIT clause would be a syntax error here.
+    let page = Query::<_, User>::new()
+        .limit(1)
+        .offset(1)
+        .paginate(Pagination::new(1, 20), &pool)
+        .await
+        .expect("paginate");
+    assert_eq!(page.total, 10);
+    assert_eq!(page.content.len(), 10);
+}
+
+#[tokio::test]
 async fn json_column_query_round_trip() {
     let pool = pool().await;
     let mut user = user("jsonfan", 1, true);
@@ -201,7 +218,7 @@ fn sql_text_is_generated_correctly() {
         .offset(20);
     assert_eq!(
         query.sql(),
-        "SELECT * FROM users WHERE age = ? AND active = ? ORDER BY name DESC LIMIT 10 OFFSET 20"
+        "SELECT * FROM \"users\" WHERE \"age\" = ? AND \"active\" = ? ORDER BY \"name\" DESC LIMIT 10 OFFSET 20"
     );
 }
 
@@ -213,6 +230,6 @@ fn sql_text_uses_dollar_placeholders() {
         .where_eq(UserCol::Active, true);
     assert_eq!(
         query.sql(),
-        "SELECT * FROM users WHERE age = $1 AND active = $2"
+        "SELECT * FROM \"users\" WHERE \"age\" = $1 AND \"active\" = $2"
     );
 }

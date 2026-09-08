@@ -7,7 +7,7 @@ value is not in ported utility functions (Rust's ecosystem covers those), it
 is in the type-safe layer built on sqlx/axum.
 
 | Crate | What |
-|---|---|
+| --- | --- |
 | [`vivarium-core`] | `Page<T>` / `Pagination` / `Order` / `Column` / `Sorter` / `Entity` / `Value` |
 | [`vivarium-macros`] | `#[derive(Entity)]` |
 | [`vivarium-db`] | sqlx: generic CRUD, chainable queries, pagination, migrations |
@@ -94,7 +94,7 @@ impl Column for UserCol {
 
 async fn active_above(pool: &vivarium_rs::sqlx::sqlite::SqlitePool, age: i64) -> sqlx::Result<Vec<User>> {
     Query::<_, User>::new()
-        .where_eq(UserCol::Age, age)          // compile-time checked bind type
+        .where_eq(UserCol::Age, age)          // closed Value bind: compile-time checked
         .order_by(Sorter::new(UserCol::Name, Order::Desc))
         .limit(50)
         .find(pool)
@@ -147,7 +147,7 @@ let cfg = config.get();           // lock-free Arc read
 
 `Varser` rejects with `422` and a Go-style message — `[field]: [rule]`:
 
-```
+```rust
 HTTP/1.1 422 Unprocessable Entity
 {"code":"VALIDATION","message":"[name]: [length is lower than 1]"}
 ```
@@ -159,7 +159,7 @@ appears in the response while debug mode is on (`VIVARIUM_DEBUG=1` or
 ## Features
 
 | Feature | Enables |
-|---|---|
+| --- | --- |
 | `db` | query/CRUD layer, no driver |
 | `db-sqlite` / `db-postgres` / `db-mysql` | the matching driver |
 | `web` | axum layer |

@@ -194,6 +194,9 @@ impl<T> Page<T> {
 /// `serde_json::Value` onto [`Json`]. `Option<T>` maps to [`Null`] when
 /// `None`.
 ///
+/// Integer conversions use `as i64`, matching the derive: `u64`/`usize`
+/// values above `i64::MAX` wrap silently.
+///
 /// [`I64`]: Value::I64
 /// [`F64`]: Value::F64
 /// [`Text`]: Value::Text
@@ -204,6 +207,10 @@ impl<T> Page<T> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// SQL `NULL`.
+    ///
+    /// The db layer binds this as an `INT8`-typed NULL; PostgreSQL rejects
+    /// comparisons of it against non-integer columns (e.g. `text = $1`) at
+    /// prepare time. Use raw `sqlx` for typed NULLs.
     Null,
     /// A 64-bit integer column.
     I64(i64),
@@ -218,6 +225,136 @@ pub enum Value {
     /// A JSON column (`TEXT` on SQLite, `JSONB` on PostgreSQL, `JSON` on
     /// MySQL).
     Json(serde_json::Value),
+}
+
+impl From<i8> for Value {
+    fn from(value: i8) -> Self {
+        Value::I64(i64::from(value))
+    }
+}
+
+impl From<i16> for Value {
+    fn from(value: i16) -> Self {
+        Value::I64(i64::from(value))
+    }
+}
+
+impl From<i32> for Value {
+    fn from(value: i32) -> Self {
+        Value::I64(i64::from(value))
+    }
+}
+
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Value::I64(value)
+    }
+}
+
+impl From<u8> for Value {
+    fn from(value: u8) -> Self {
+        Value::I64(i64::from(value))
+    }
+}
+
+impl From<u16> for Value {
+    fn from(value: u16) -> Self {
+        Value::I64(i64::from(value))
+    }
+}
+
+impl From<u32> for Value {
+    fn from(value: u32) -> Self {
+        Value::I64(i64::from(value))
+    }
+}
+
+impl From<u64> for Value {
+    fn from(value: u64) -> Self {
+        Value::I64(value as i64)
+    }
+}
+
+impl From<usize> for Value {
+    fn from(value: usize) -> Self {
+        Value::I64(value as i64)
+    }
+}
+
+impl From<isize> for Value {
+    fn from(value: isize) -> Self {
+        Value::I64(value as i64)
+    }
+}
+
+impl From<f32> for Value {
+    fn from(value: f32) -> Self {
+        Value::F64(f64::from(value))
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Value::F64(value)
+    }
+}
+
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Value::Bool(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Value::Text(value.to_owned())
+    }
+}
+
+impl From<&String> for Value {
+    fn from(value: &String) -> Self {
+        Value::Text(value.clone())
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Value::Text(value)
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(value: Vec<u8>) -> Self {
+        Value::Bytes(value)
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(value: &[u8]) -> Self {
+        Value::Bytes(value.to_vec())
+    }
+}
+
+impl From<serde_json::Value> for Value {
+    fn from(value: serde_json::Value) -> Self {
+        Value::Json(value)
+    }
+}
+
+/// Converts an optional value: `Some` converts the inner value, `None`
+/// becomes [`Value::Null`]. Nested `Option`s collapse — `Some(None)` and
+/// `None` are both [`Value::Null`] — while `#[derive(Entity)]` rejects
+/// nested `Option` fields at compile time.
+impl<T> From<Option<T>> for Value
+where
+    T: Into<Value>,
+{
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(value) => value.into(),
+            None => Value::Null,
+        }
+    }
 }
 
 /// A type mappable to a single database table, enabling the generic CRUD and

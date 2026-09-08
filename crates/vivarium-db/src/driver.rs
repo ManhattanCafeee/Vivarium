@@ -5,14 +5,22 @@
 //! decodes (ids, counts, `Value`s) need one impl per driver. Additionally,
 //! borrows into a `QueryBuilder<DB>` cannot cross `.await` in generic code
 //! (rustc cannot see `DB::Arguments`'s destructor for drop-checking), so all
-//! query execution lives in these per-driver impls. Everything here is sealed
-//! and hidden; the public API only uses it as a bound.
+//! query execution lives in these per-driver impls.
+//!
+//! The execution futures are deliberately boxed (`Pin<Box<dyn Future +
+//! Send>>`), not `impl Future`: type erasure keeps the executor parameter
+//! `E` and its borrow lifetime out of the future types these methods return.
+//! An `impl Future` return carries the `E: Executor` obligation in its type;
+//! awaited inside an axum handler, rustc then cannot generalize `Send` over
+//! the executor's lifetime and rejects the handler (compile errors citing
+//! rustc #100013). Do not "optimize" these back to `impl Future` without
+//! re-testing axum handlers. Everything here is sealed and hidden; the
+//! public API only uses it as a bound.
 
-use sqlx::{Database, Encode, Executor, QueryBuilder, Type};
+use sqlx::types::Json;
+use sqlx::{Database, Executor, QueryBuilder};
 use std::future::Future;
-use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::Arc;
 use vivarium_core::Value;
 
 use crate::Error;
@@ -28,83 +36,18 @@ mod private {
     impl Sealed for sqlx::MySql {}
 }
 
-/// A re-callable bind push: pushes one or more bind values onto a
-/// [`QueryBuilder`] (the builder appends its own placeholders).
-///
-/// A trait object (not an HRTB `Fn` object) on purpose: HRTB closures make
-/// futures holding them unprovably `Send` (rustc #100013), which would break
-/// axum handlers.
-#[doc(hidden)]
-pub trait Binder: Send + Sync {
-    /// The database this binder pushes values for.
-    type DB: Database;
-
-    /// Pushes this binder's values onto the query builder.
-    fn bind(&self, qb: &mut QueryBuilder<'_, Self::DB>);
-}
-
-/// Binder alias with the database type fixed.
-#[doc(hidden)]
-pub type BinderFor<DB> = Arc<dyn Binder<DB = DB>>;
-
-/// Binds one driver-typed value (used by [`Query::where_eq`]).
-#[doc(hidden)]
-pub struct TypedBinder<V, DB> {
-    /// The value to bind.
-    pub value: V,
-    /// Type marker.
-    pub _db: PhantomData<fn() -> DB>,
-}
-
-impl<V, DB> Binder for TypedBinder<V, DB>
-where
-    DB: Database,
-    V: for<'x> Encode<'x, DB> + Type<DB> + Clone + Send + Sync + 'static,
-{
-    type DB = DB;
-
-    fn bind(&self, qb: &mut QueryBuilder<'_, Self::DB>) {
-        qb.push_bind(self.value.clone());
-    }
-}
-
-/// Binds one [`Value`] with driver-correct types (used by the CRUD helpers).
-#[doc(hidden)]
-pub struct ValueBinder<DB> {
-    /// The value to bind.
-    pub value: Value,
-    /// Type marker.
-    pub _db: PhantomData<fn() -> DB>,
-}
-
-impl<DB: DriverOps> Binder for ValueBinder<DB> {
-    type DB = DB;
-
-    fn bind(&self, qb: &mut QueryBuilder<'_, Self::DB>) {
-        DB::bind_value(qb, self.value.clone());
-    }
-}
-
 /// One fragment of a query: literal SQL text, or a bind push.
 ///
 /// Placeholders are never written into the text; [`QueryBuilder::push_bind`]
 /// appends them with the driver's syntax (`?` vs `$1`), so text and binds
 /// must be interleaved in execution order.
 #[doc(hidden)]
-pub enum Step<DB: Database> {
+#[derive(Clone)]
+pub enum Step {
     /// Literal SQL text.
     Text(String),
     /// A bind value push.
-    Bind(BinderFor<DB>),
-}
-
-impl<DB: Database> Clone for Step<DB> {
-    fn clone(&self) -> Self {
-        match self {
-            Step::Text(text) => Step::Text(text.clone()),
-            Step::Bind(bind) => Step::Bind(bind.clone()),
-        }
-    }
+    Bind(Value),
 }
 
 /// Driver-specific operations backing the generic CRUD and query API.
@@ -116,23 +59,37 @@ impl<DB: Database> Clone for Step<DB> {
 /// decodes type-check per driver; you never call it directly.
 #[doc(hidden)]
 pub trait DriverOps: Database + private::Sealed + Sized {
-    /// The bind placeholder for the 1-based `index` (`?`, or `$1`, `$2`, ...).
-    /// Used only for rendering SQL text for debugging/tests.
-    fn placeholder(index: usize) -> String;
-
     /// The `RETURNING <id_col>` clause for drivers that support it; empty
-    /// otherwise.
+    /// otherwise. The column name is quoted.
     fn returning_clause(id_col: &str) -> String;
 
     /// The affected-row count of a query result.
     fn rows_affected(result: &Self::QueryResult) -> u64;
 
-    /// Binds a [`Value`] onto a query builder with driver-correct types.
-    fn bind_value(qb: &mut QueryBuilder<'_, Self>, value: Value);
+    /// Quotes an identifier for SQL text: double quotes for SQLite and
+    /// PostgreSQL, backticks for MySQL. Embedded quote characters are
+    /// doubled.
+    fn quote_ident(name: &str) -> String;
+
+    /// Binds a [`Value`] by reference onto a query builder with
+    /// driver-correct types. No values are copied; the builder encodes them
+    /// into its argument buffer.
+    fn bind_value<'a>(qb: &mut QueryBuilder<'a, Self>, value: &'a Value);
+
+    /// Renders `prefix + clauses + suffix` with driver placeholders inlined,
+    /// for debugging and SQL-text tests. Never touches a connection.
+    fn render_sql(prefix: &str, clauses: &[Step], suffix: &str) -> String {
+        let mut qb = QueryBuilder::<Self>::new(prefix.to_owned());
+        push_steps(&mut qb, clauses);
+        qb.push(suffix);
+        qb.sql().to_owned()
+    }
 
     /// Runs the built INSERT and returns the generated (or provided) id.
     fn generated_id<'c, E>(
-        steps: Vec<Step<Self>>,
+        prefix: String,
+        clauses: Vec<Step>,
+        suffix: String,
         db: E,
     ) -> Pin<Box<dyn Future<Output = Result<i64, Error>> + Send + 'c>>
     where
@@ -140,7 +97,9 @@ pub trait DriverOps: Database + private::Sealed + Sized {
 
     /// Runs the query, returning all decoded rows.
     fn fetch_all<'c, E, T>(
-        steps: Vec<Step<Self>>,
+        prefix: String,
+        clauses: Vec<Step>,
+        suffix: String,
         db: E,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<T>, Error>> + Send + 'c>>
     where
@@ -149,7 +108,9 @@ pub trait DriverOps: Database + private::Sealed + Sized {
 
     /// Runs the query, returning the first decoded row if any.
     fn fetch_optional<'c, E, T>(
-        steps: Vec<Step<Self>>,
+        prefix: String,
+        clauses: Vec<Step>,
+        suffix: String,
         db: E,
     ) -> Pin<Box<dyn Future<Output = Result<Option<T>, Error>> + Send + 'c>>
     where
@@ -158,7 +119,9 @@ pub trait DriverOps: Database + private::Sealed + Sized {
 
     /// Runs the query, returning the affected-row count.
     fn execute<'c, E>(
-        steps: Vec<Step<Self>>,
+        prefix: String,
+        clauses: Vec<Step>,
+        suffix: String,
         db: E,
     ) -> Pin<Box<dyn Future<Output = Result<u64, Error>> + Send + 'c>>
     where
@@ -166,7 +129,9 @@ pub trait DriverOps: Database + private::Sealed + Sized {
 
     /// Runs the query, returning its single i64 column (COUNT etc.).
     fn scalar_i64<'c, E>(
-        steps: Vec<Step<Self>>,
+        prefix: String,
+        clauses: Vec<Step>,
+        suffix: String,
         db: E,
     ) -> Pin<Box<dyn Future<Output = Result<i64, Error>> + Send + 'c>>
     where
@@ -174,7 +139,9 @@ pub trait DriverOps: Database + private::Sealed + Sized {
 
     /// Runs the query, returning its single bool column (EXISTS etc.).
     fn scalar_bool<'c, E>(
-        steps: Vec<Step<Self>>,
+        prefix: String,
+        clauses: Vec<Step>,
+        suffix: String,
         db: E,
     ) -> Pin<Box<dyn Future<Output = Result<bool, Error>> + Send + 'c>>
     where
@@ -201,19 +168,11 @@ fn pg_rowid(_result: &sqlx::postgres::PgQueryResult) -> i64 {
 }
 
 macro_rules! impl_driver_ops {
-    ($db:ty, $dollar:literal, $returning:literal, $rowid:path) => {
+    ($db:ty, $quote:literal, $returning:literal, $rowid:path) => {
         impl DriverOps for $db {
-            fn placeholder(index: usize) -> String {
-                if $dollar {
-                    format!("${index}")
-                } else {
-                    "?".to_owned()
-                }
-            }
-
             fn returning_clause(id_col: &str) -> String {
                 if $returning {
-                    format!(" RETURNING {id_col}")
+                    format!(" RETURNING {}", Self::quote_ident(id_col))
                 } else {
                     String::new()
                 }
@@ -223,42 +182,53 @@ macro_rules! impl_driver_ops {
                 result.rows_affected()
             }
 
-            fn bind_value(qb: &mut QueryBuilder<'_, Self>, value: Value) {
+            fn quote_ident(name: &str) -> String {
+                let escaped = name.replace($quote, &$quote.repeat(2));
+                format!("{}{}{}", $quote, escaped, $quote)
+            }
+
+            fn bind_value<'a>(qb: &mut QueryBuilder<'a, Self>, value: &'a Value) {
                 match value {
                     Value::Null => {
+                        // INT8-typed NULL: PostgreSQL rejects `col = $1`
+                        // against non-integer columns at prepare time; use
+                        // raw sqlx for typed NULLs.
                         qb.push_bind(Option::<i64>::None);
                     }
                     Value::I64(v) => {
-                        qb.push_bind(v);
+                        qb.push_bind(*v);
                     }
                     Value::F64(v) => {
-                        qb.push_bind(v);
+                        qb.push_bind(*v);
                     }
                     Value::Text(v) => {
-                        qb.push_bind(v);
+                        qb.push_bind(v.as_str());
                     }
                     Value::Bytes(v) => {
-                        qb.push_bind(v);
+                        qb.push_bind(v.as_slice());
                     }
                     Value::Bool(v) => {
-                        qb.push_bind(v);
+                        qb.push_bind(*v);
                     }
                     Value::Json(v) => {
-                        qb.push_bind(v);
+                        qb.push_bind(Json(v));
                     }
                 }
             }
 
             fn generated_id<'c, E>(
-                steps: Vec<Step<Self>>,
+                prefix: String,
+                clauses: Vec<Step>,
+                suffix: String,
                 db: E,
             ) -> Pin<Box<dyn Future<Output = Result<i64, Error>> + Send + 'c>>
             where
                 E: Executor<'c, Database = Self> + 'c,
             {
                 Box::pin(async move {
-                    let mut qb = QueryBuilder::new(String::new());
-                    push_steps(&mut qb, &steps);
+                    let mut qb = QueryBuilder::new(prefix);
+                    push_steps(&mut qb, &clauses);
+                    qb.push(&suffix);
                     if $returning {
                         let query = qb.build_query_scalar::<i64>();
                         query.fetch_one(db).await
@@ -271,7 +241,9 @@ macro_rules! impl_driver_ops {
             }
 
             fn fetch_all<'c, E, T>(
-                steps: Vec<Step<Self>>,
+                prefix: String,
+                clauses: Vec<Step>,
+                suffix: String,
                 db: E,
             ) -> Pin<Box<dyn Future<Output = Result<Vec<T>, Error>> + Send + 'c>>
             where
@@ -279,15 +251,18 @@ macro_rules! impl_driver_ops {
                 T: for<'r> sqlx::FromRow<'r, Self::Row> + Send + Unpin,
             {
                 Box::pin(async move {
-                    let mut qb = QueryBuilder::new(String::new());
-                    push_steps(&mut qb, &steps);
+                    let mut qb = QueryBuilder::new(prefix);
+                    push_steps(&mut qb, &clauses);
+                    qb.push(&suffix);
                     let query = qb.build_query_as::<T>();
                     query.fetch_all(db).await
                 })
             }
 
             fn fetch_optional<'c, E, T>(
-                steps: Vec<Step<Self>>,
+                prefix: String,
+                clauses: Vec<Step>,
+                suffix: String,
                 db: E,
             ) -> Pin<Box<dyn Future<Output = Result<Option<T>, Error>> + Send + 'c>>
             where
@@ -295,23 +270,27 @@ macro_rules! impl_driver_ops {
                 T: for<'r> sqlx::FromRow<'r, Self::Row> + Send + Unpin,
             {
                 Box::pin(async move {
-                    let mut qb = QueryBuilder::new(String::new());
-                    push_steps(&mut qb, &steps);
+                    let mut qb = QueryBuilder::new(prefix);
+                    push_steps(&mut qb, &clauses);
+                    qb.push(&suffix);
                     let query = qb.build_query_as::<T>();
                     query.fetch_optional(db).await
                 })
             }
 
             fn execute<'c, E>(
-                steps: Vec<Step<Self>>,
+                prefix: String,
+                clauses: Vec<Step>,
+                suffix: String,
                 db: E,
             ) -> Pin<Box<dyn Future<Output = Result<u64, Error>> + Send + 'c>>
             where
                 E: Executor<'c, Database = Self> + 'c,
             {
                 Box::pin(async move {
-                    let mut qb = QueryBuilder::new(String::new());
-                    push_steps(&mut qb, &steps);
+                    let mut qb = QueryBuilder::new(prefix);
+                    push_steps(&mut qb, &clauses);
+                    qb.push(&suffix);
                     let query = qb.build();
                     let result = query.execute(db).await?;
                     Ok(Self::rows_affected(&result))
@@ -319,30 +298,36 @@ macro_rules! impl_driver_ops {
             }
 
             fn scalar_i64<'c, E>(
-                steps: Vec<Step<Self>>,
+                prefix: String,
+                clauses: Vec<Step>,
+                suffix: String,
                 db: E,
             ) -> Pin<Box<dyn Future<Output = Result<i64, Error>> + Send + 'c>>
             where
                 E: Executor<'c, Database = Self> + 'c,
             {
                 Box::pin(async move {
-                    let mut qb = QueryBuilder::new(String::new());
-                    push_steps(&mut qb, &steps);
+                    let mut qb = QueryBuilder::new(prefix);
+                    push_steps(&mut qb, &clauses);
+                    qb.push(&suffix);
                     let query = qb.build_query_scalar::<i64>();
                     query.fetch_one(db).await
                 })
             }
 
             fn scalar_bool<'c, E>(
-                steps: Vec<Step<Self>>,
+                prefix: String,
+                clauses: Vec<Step>,
+                suffix: String,
                 db: E,
             ) -> Pin<Box<dyn Future<Output = Result<bool, Error>> + Send + 'c>>
             where
                 E: Executor<'c, Database = Self> + 'c,
             {
                 Box::pin(async move {
-                    let mut qb = QueryBuilder::new(String::new());
-                    push_steps(&mut qb, &steps);
+                    let mut qb = QueryBuilder::new(prefix);
+                    push_steps(&mut qb, &clauses);
+                    qb.push(&suffix);
                     let query = qb.build_query_scalar::<bool>();
                     query.fetch_one(db).await
                 })
@@ -351,25 +336,26 @@ macro_rules! impl_driver_ops {
     };
 }
 
-/// Pushes text and bind steps onto a query builder in order.
-fn push_steps<DB: Database>(qb: &mut QueryBuilder<'_, DB>, steps: &[Step<DB>]) {
+/// Pushes text and bind steps onto a query builder in order. Binds are
+/// pushed by reference; nothing is copied beyond the builder's own encoding.
+fn push_steps<'a, DB: DriverOps>(qb: &mut QueryBuilder<'a, DB>, steps: &'a [Step]) {
     for step in steps {
         match step {
             Step::Text(text) => {
                 qb.push(text);
             }
-            Step::Bind(bind) => {
-                bind.bind(qb);
+            Step::Bind(value) => {
+                DB::bind_value(qb, value);
             }
         }
     }
 }
 
 #[cfg(feature = "sqlite")]
-impl_driver_ops!(sqlx::Sqlite, false, false, sqlite_rowid);
+impl_driver_ops!(sqlx::Sqlite, "\"", false, sqlite_rowid);
 
 #[cfg(feature = "postgres")]
-impl_driver_ops!(sqlx::Postgres, true, true, pg_rowid);
+impl_driver_ops!(sqlx::Postgres, "\"", true, pg_rowid);
 
 #[cfg(feature = "mysql")]
-impl_driver_ops!(sqlx::MySql, false, false, mysql_rowid);
+impl_driver_ops!(sqlx::MySql, "`", false, mysql_rowid);

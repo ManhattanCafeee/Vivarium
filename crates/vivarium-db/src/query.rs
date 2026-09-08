@@ -1,28 +1,35 @@
 //! Chainable `SELECT` query builder: where/order/limit/offset clauses plus
 //! `find`, `first`, `count`, and `paginate`.
 //!
-//! Clauses collect into a plain SQL string plus replayable bind closures, so
+//! Clauses collect into a plain SQL string plus replayable bind values, so
 //! building is side-effect free and repeatable — which is what makes `count`
 //! plus page queries inside [`Query::paginate`] cheap and correct. All actual
 //! query execution happens in per-driver impls (see [`crate::DriverOps`]);
 //! nothing here touches a live connection.
 //!
-//! Bind values must be owned (`V: 'static`); pass `String` instead of
-//! `&str`, and `Option<T>` instead of borrowed references.
+//! Bind values convert into the closed [`Value`] enum via `Into<Value>`:
+//! strings (`&str` or `String`), integers, floats, bools, bytes, JSON, and
+//! `Option`s of those are accepted. Values are bound by reference — nothing
+//! is copied at execution time; only the where-clause steps are cloned per
+//! build (`find` pays one clone, `paginate` two).
+//!
+//! Table and column names are quoted with the driver's syntax, so columns
+//! named after SQL keywords (`order`, `desc`, …) are safe. [`Column`]
+//! implementations carry logical names only.
 
 use std::marker::PhantomData;
 
-use sqlx::{Database, Encode, Executor, FromRow, Type};
-use vivarium_core::{Column, Entity, Order, Page, Pagination, Sorter};
+use sqlx::{Database, Executor, FromRow};
+use vivarium_core::{Column, Entity, Order, Page, Pagination, Sorter, Value};
 
-use crate::{DriverOps, Error, Step, TypedBinder};
+use crate::{DriverOps, Error, Step};
 
 /// A chainable `SELECT` query over an [`Entity`] table.
 ///
 /// Build it with [`new`], add clauses, then run [`find`], [`first`],
-/// [`count`], or [`paginate`]. Bind values are typed at compile time against
-/// the driver, and column names can only come from a [`Column`] impl — no
-/// stringly-typed injection.
+/// [`count`], or [`paginate`]. Bind values convert into the closed
+/// [`Value`] enum (compile-time checked), and column names can only come
+/// from a [`Column`] impl — no stringly-typed injection.
 ///
 /// [`new`]: Query::new
 /// [`find`]: Query::find
@@ -30,10 +37,11 @@ use crate::{DriverOps, Error, Step, TypedBinder};
 /// [`count`]: Query::count
 /// [`paginate`]: Query::paginate
 pub struct Query<DB: Database, T> {
-    steps: Vec<Step<DB>>,
+    steps: Vec<Step>,
     sorters: Vec<(String, Order)>,
     limit: Option<u64>,
     offset: Option<u64>,
+    _db: PhantomData<fn() -> DB>,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -49,31 +57,34 @@ where
             sorters: Vec::new(),
             limit: None,
             offset: None,
+            _db: PhantomData,
             _marker: PhantomData,
         }
     }
 
     /// Adds an `AND col = value` clause (the first one becomes `WHERE`).
     ///
-    /// The value type must be encodable for the driver; mismatched types are
-    /// rejected at compile time. Values must be owned and clonable because
-    /// binds are replayed for count/page queries.
+    /// The value converts into the closed [`Value`] enum — strings,
+    /// integers, floats, bools, bytes, JSON, or `Option`s of those — so the
+    /// bindable set is fixed at compile time. Integers are stored as
+    /// [`Value::I64`]: `u64`/`usize` inputs above `i64::MAX` wrap silently.
+    /// `None` binds as an `INT8`-typed NULL that PostgreSQL rejects against
+    /// non-integer columns — for typed NULLs use raw `sqlx`.
     pub fn where_eq<C, V>(mut self, col: C, value: V) -> Self
     where
         C: Column,
-        V: for<'x> Encode<'x, DB> + Type<DB> + Clone + Send + Sync + 'static,
+        V: Into<Value>,
     {
         let prefix = if self.steps.is_empty() {
             " WHERE "
         } else {
             " AND "
         };
-        self.steps
-            .push(Step::Text(format!("{prefix}{} = ", col.name())));
-        self.steps.push(Step::Bind(std::sync::Arc::new(TypedBinder {
-            value,
-            _db: PhantomData,
-        })));
+        self.steps.push(Step::Text(format!(
+            "{prefix}{} = ",
+            DB::quote_ident(col.name())
+        )));
+        self.steps.push(Step::Bind(value.into()));
         self
     }
 
@@ -81,7 +92,7 @@ where
     /// columns, in call order.
     pub fn order_by<C: Column>(mut self, sorter: Sorter<C>) -> Self {
         self.sorters
-            .push((sorter.col.name().to_owned(), sorter.order));
+            .push((DB::quote_ident(sorter.col.name()), sorter.order));
         self
     }
 
@@ -103,23 +114,13 @@ where
     ///
     /// Useful for debugging and for unit tests that need no database.
     pub fn sql(&self) -> String {
-        let mut sql = format!("SELECT * FROM {}", T::TABLE);
-        let mut index = 0;
-        for step in &self.steps {
-            match step {
-                Step::Text(text) => sql.push_str(text),
-                Step::Bind(_) => {
-                    index += 1;
-                    sql.push_str(&DB::placeholder(index));
-                }
-            }
-        }
-        self.push_tail(&mut sql);
-        sql
+        let prefix = format!("SELECT * FROM {}", DB::quote_ident(T::TABLE));
+        DB::render_sql(&prefix, &self.steps, &self.tail())
     }
 
-    /// Appends the order/limit/offset tail to a select SQL string.
-    fn push_tail(&self, sql: &mut String) {
+    /// The `ORDER BY` tail text, excluding the query's own limit/offset.
+    fn order_tail(&self) -> String {
+        let mut sql = String::new();
         if !self.sorters.is_empty() {
             sql.push_str(" ORDER BY ");
             for (i, (col, order)) in self.sorters.iter().enumerate() {
@@ -131,32 +132,29 @@ where
                 sql.push_str(&order.to_string());
             }
         }
+        sql
+    }
+
+    /// The full tail: `ORDER BY` plus the query's own limit/offset.
+    fn tail(&self) -> String {
+        let mut sql = self.order_tail();
         if let Some(limit) = self.limit {
             sql.push_str(&format!(" LIMIT {limit}"));
         }
         if let Some(offset) = self.offset {
             sql.push_str(&format!(" OFFSET {offset}"));
         }
+        sql
     }
 
-    /// The step list of the full select query.
-    fn select_steps(&self) -> Vec<Step<DB>> {
-        let mut steps = vec![Step::Text(format!("SELECT * FROM {}", T::TABLE))];
-        steps.extend(self.steps.iter().cloned());
-        let mut tail = String::new();
-        self.push_tail(&mut tail);
-        if !tail.is_empty() {
-            steps.push(Step::Text(tail));
-        }
-        steps
+    /// The quoted `SELECT * FROM <table>` prefix.
+    fn select_prefix() -> String {
+        format!("SELECT * FROM {}", DB::quote_ident(T::TABLE))
     }
 
-    /// The step list of the matching `SELECT COUNT(*)` variant (order, limit,
-    /// and offset are ignored).
-    fn count_steps(&self) -> Vec<Step<DB>> {
-        let mut steps = vec![Step::Text(format!("SELECT COUNT(*) FROM {}", T::TABLE))];
-        steps.extend(self.steps.iter().cloned());
-        steps
+    /// The quoted `SELECT COUNT(*) FROM <table>` prefix.
+    fn count_prefix() -> String {
+        format!("SELECT COUNT(*) FROM {}", DB::quote_ident(T::TABLE))
     }
 
     /// Runs the query, returning all matching rows.
@@ -165,7 +163,7 @@ where
         E: Executor<'e, Database = DB> + 'e,
         T: for<'r> FromRow<'r, DB::Row> + Send + Unpin,
     {
-        DB::fetch_all(self.select_steps(), db).await
+        DB::fetch_all(Self::select_prefix(), self.steps.clone(), self.tail(), db).await
     }
 
     /// Runs the query with `LIMIT 1`, returning the first row if any.
@@ -174,9 +172,8 @@ where
         E: Executor<'e, Database = DB> + 'e,
         T: for<'r> FromRow<'r, DB::Row> + Send + Unpin,
     {
-        let mut steps = self.select_steps();
-        steps.push(Step::Text(" LIMIT 1".to_owned()));
-        DB::fetch_optional(steps, db).await
+        let suffix = format!("{} LIMIT 1", self.tail());
+        DB::fetch_optional(Self::select_prefix(), self.steps.clone(), suffix, db).await
     }
 
     /// Counts rows matching this query's where clauses.
@@ -184,7 +181,7 @@ where
     where
         E: Executor<'e, Database = DB> + 'e,
     {
-        DB::scalar_i64(self.count_steps(), db).await
+        DB::scalar_i64(Self::count_prefix(), self.steps.clone(), String::new(), db).await
     }
 
     /// Runs the query as one page: normalizes `pagination`, counts the total,
@@ -201,9 +198,8 @@ where
         pagination.normalize();
         let total = self.count(db).await?.max(0) as u64;
         let (limit, offset) = pagination.limit_offset();
-        let mut steps = self.select_steps();
-        steps.push(Step::Text(format!(" LIMIT {limit} OFFSET {offset}")));
-        let content = DB::fetch_all(steps, db).await?;
+        let suffix = format!("{} LIMIT {limit} OFFSET {offset}", self.order_tail());
+        let content = DB::fetch_all(Self::select_prefix(), self.steps.clone(), suffix, db).await?;
         Ok(Page {
             total,
             page: pagination.page,

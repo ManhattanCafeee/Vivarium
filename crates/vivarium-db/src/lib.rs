@@ -58,7 +58,7 @@ pub mod query;
 mod driver;
 
 #[doc(hidden)]
-pub use driver::{Binder, BinderFor, DriverOps, Step, TypedBinder, ValueBinder};
+pub use driver::{DriverOps, Step};
 
 pub use crud::{count, create, delete, exists, find_by_id, update_by_id};
 pub use query::Query;

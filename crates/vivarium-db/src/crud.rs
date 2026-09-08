@@ -1,22 +1,18 @@
 //! Generic CRUD over [`Entity`] types: find, create, update, delete, count,
 //! and exists. No SQL strings anywhere — table and column names come from the
-//! [`Entity`] impl (usually derived), and bind values are type-checked per
-//! driver.
+//! [`Entity`] impl (usually derived, quoted with the driver's syntax), and
+//! bind values come from the closed [`Value`] enum, bound by reference.
 //!
 //! [`Entity`]: vivarium_core::Entity
 
 use sqlx::Executor;
-use std::marker::PhantomData;
 use vivarium_core::{Entity, Value};
 
-use crate::{DriverOps, Error, Step, ValueBinder};
+use crate::{DriverOps, Error, Step};
 
 /// Builds a bind step for a single id value.
-fn id_bind<DB: DriverOps>(id: i64) -> Step<DB> {
-    Step::Bind(std::sync::Arc::new(ValueBinder {
-        value: Value::I64(id),
-        _db: PhantomData,
-    }))
+fn id_bind(id: i64) -> Step {
+    Step::Bind(Value::I64(id))
 }
 
 /// Fetches the row with the given id, if present.
@@ -31,15 +27,12 @@ where
     DB: DriverOps,
     T: Entity + for<'r> sqlx::FromRow<'r, DB::Row> + Send + Unpin,
 {
-    let steps = vec![
-        Step::Text(format!(
-            "SELECT * FROM {} WHERE {} = ",
-            T::TABLE,
-            T::ID_COLUMN
-        )),
-        id_bind::<DB>(id),
-    ];
-    DB::fetch_optional(steps, db).await
+    let prefix = format!(
+        "SELECT * FROM {} WHERE {} = ",
+        DB::quote_ident(T::TABLE),
+        DB::quote_ident(T::ID_COLUMN)
+    );
+    DB::fetch_optional(prefix, vec![id_bind(id)], String::new(), db).await
 }
 
 /// Inserts the entity and returns its id.
@@ -64,28 +57,23 @@ where
     };
     let cols = pairs
         .iter()
-        .map(|(col, _)| *col)
+        .map(|(col, _)| DB::quote_ident(col))
         .collect::<Vec<_>>()
         .join(", ");
 
-    let mut steps: Vec<Step<DB>> = vec![Step::Text(format!(
-        "INSERT INTO {} ({cols}) VALUES (",
-        T::TABLE
-    ))];
+    let mut clauses: Vec<Step> = Vec::new();
     for (i, (_, value)) in pairs.into_iter().enumerate() {
         if i > 0 {
-            steps.push(Step::Text(", ".to_owned()));
+            clauses.push(Step::Text(", ".to_owned()));
         }
-        steps.push(Step::Bind(std::sync::Arc::new(ValueBinder {
-            value,
-            _db: PhantomData,
-        })));
+        clauses.push(Step::Bind(value));
     }
-    steps.push(Step::Text(format!(
-        "){}",
-        DB::returning_clause(T::ID_COLUMN)
-    )));
-    DB::generated_id(steps, db).await
+    let prefix = format!(
+        "INSERT INTO {} ({cols}) VALUES (",
+        DB::quote_ident(T::TABLE)
+    );
+    let suffix = format!("){}", DB::returning_clause(T::ID_COLUMN));
+    DB::generated_id(prefix, clauses, suffix, db).await
 }
 
 /// Updates the row with the given id, setting every non-id column of
@@ -107,20 +95,21 @@ where
             "entity has no updatable columns".to_owned(),
         ));
     }
-    let mut steps: Vec<Step<DB>> = vec![Step::Text(format!("UPDATE {} SET ", T::TABLE))];
+    let mut clauses: Vec<Step> = Vec::new();
     for (i, (col, value)) in pairs.into_iter().enumerate() {
         if i > 0 {
-            steps.push(Step::Text(", ".to_owned()));
+            clauses.push(Step::Text(", ".to_owned()));
         }
-        steps.push(Step::Text(format!("{col} = ")));
-        steps.push(Step::Bind(std::sync::Arc::new(ValueBinder {
-            value,
-            _db: PhantomData,
-        })));
+        clauses.push(Step::Text(format!("{} = ", DB::quote_ident(col))));
+        clauses.push(Step::Bind(value));
     }
-    steps.push(Step::Text(format!(" WHERE {} = ", T::ID_COLUMN)));
-    steps.push(id_bind::<DB>(id));
-    DB::execute(steps, db).await
+    clauses.push(Step::Text(format!(
+        " WHERE {} = ",
+        DB::quote_ident(T::ID_COLUMN)
+    )));
+    clauses.push(id_bind(id));
+    let prefix = format!("UPDATE {} SET ", DB::quote_ident(T::TABLE));
+    DB::execute(prefix, clauses, String::new(), db).await
 }
 
 /// Deletes the row with the given id.
@@ -134,15 +123,12 @@ where
     DB: DriverOps,
     T: Entity,
 {
-    let steps = vec![
-        Step::Text(format!(
-            "DELETE FROM {} WHERE {} = ",
-            T::TABLE,
-            T::ID_COLUMN
-        )),
-        id_bind::<DB>(id),
-    ];
-    DB::execute(steps, db).await
+    let prefix = format!(
+        "DELETE FROM {} WHERE {} = ",
+        DB::quote_ident(T::TABLE),
+        DB::quote_ident(T::ID_COLUMN)
+    );
+    DB::execute(prefix, vec![id_bind(id)], String::new(), db).await
 }
 
 /// Counts all rows of the entity's table.
@@ -151,8 +137,8 @@ where
     DB: DriverOps,
     T: Entity,
 {
-    let steps = vec![Step::Text(format!("SELECT COUNT(*) FROM {}", T::TABLE))];
-    DB::scalar_i64(steps, db).await
+    let prefix = format!("SELECT COUNT(*) FROM {}", DB::quote_ident(T::TABLE));
+    DB::scalar_i64(prefix, Vec::new(), String::new(), db).await
 }
 
 /// Whether a row with the given id exists.
@@ -164,14 +150,11 @@ where
     DB: DriverOps,
     T: Entity,
 {
-    let steps = vec![
-        Step::Text(format!(
-            "SELECT EXISTS(SELECT 1 FROM {} WHERE {} = ",
-            T::TABLE,
-            T::ID_COLUMN
-        )),
-        id_bind::<DB>(id),
-        Step::Text(")".to_owned()),
-    ];
-    DB::scalar_bool(steps, db).await
+    let prefix = format!(
+        "SELECT EXISTS(SELECT 1 FROM {} WHERE {} = ",
+        DB::quote_ident(T::TABLE),
+        DB::quote_ident(T::ID_COLUMN)
+    );
+    let suffix = ")".to_owned();
+    DB::scalar_bool(prefix, vec![id_bind(id)], suffix, db).await
 }
