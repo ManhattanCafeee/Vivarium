@@ -1,11 +1,11 @@
 //! # vivarium-macros
 //!
-//! Procedural macros for the [`vivarium`] family.
+//! Procedural macros for the [`vivarium-rs`] family.
 //!
 //! Currently provides [`#[derive(Entity)]`][derive@Entity], which derives
 //! `vivarium_core::Entity` for single-`i64`-primary-key structs. The derive
 //! is re-exported by `vivarium-db` and the `vivarium` facade, so it is usually
-//! used as `vivarium_db::Entity` / `vivarium::Entity` without depending on
+//! used as `vivarium_db::Entity` / `vivarium_rs::Entity` without depending on
 //! this crate directly.
 //!
 //! # Attributes
@@ -44,7 +44,7 @@
 //! assert_eq!(user.columns_and_values().len(), 3);
 //! ```
 //!
-//! [`vivarium`]: https://docs.rs/vivarium
+//! [`vivarium-rs`]: https://docs.rs/vivarium-rs
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 

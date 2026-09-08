@@ -1,6 +1,6 @@
-//! # vivarium
+//! # vivarium-rs
 //!
-//! The `vivarium` facade: one dependency, feature-gated re-exports of the
+//! The `vivarium-rs` facade: one dependency, feature-gated re-exports of the
 //! whole family.
 //!
 //! Core types ([`Pagination`], [`Page`], [`Order`], [`Column`], [`Sorter`],
@@ -22,10 +22,10 @@
 //! use axum::{Router, routing::post};
 //! use serde::{Deserialize, Serialize};
 //! use garde::Validate;
-//! use vivarium::{ApiError, Order, Query, Sorter, Varser, create};
-//! use vivarium::sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+//! use vivarium_rs::{ApiError, Order, Query, Sorter, Varser, create};
+//! use vivarium_rs::sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 //!
-//! #[derive(Clone, sqlx::FromRow, vivarium::Entity)]
+//! #[derive(Clone, sqlx::FromRow, vivarium_rs::Entity)]
 //! struct User {
 //!     id: i64,
 //!     name: String,
@@ -36,7 +36,7 @@
 //!     Name,
 //! }
 //!
-//! impl vivarium::Column for UserCol {
+//! impl vivarium_rs::Column for UserCol {
 //!     fn name(&self) -> &'static str {
 //!         match self {
 //!             UserCol::Name => "name",
@@ -50,7 +50,7 @@
 //!     name: String,
 //! }
 //!
-//! impl vivarium::Initializer for NewUser {}
+//! impl vivarium_rs::Initializer for NewUser {}
 //!
 //! #[derive(Serialize)]
 //! struct UserJson {

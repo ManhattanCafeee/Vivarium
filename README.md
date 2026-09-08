@@ -13,7 +13,7 @@ is in the type-safe layer built on sqlx/axum.
 | [`vivarium-db`] | sqlx: generic CRUD, chainable queries, pagination, migrations |
 | [`vivarium-web`] | axum: `ApiError`, `Varser`, JWT auth, `Cache-Control` layer |
 | [`vivarium-config`] | figment + notify + arc-swap hot reload |
-| [`vivarium`] | the facade: `cargo add vivarium` is all you need |
+| [`vivarium-rs`] | the facade: `cargo add vivarium-rs` is all you need |
 
 MSRV: 1.85. Drivers: SQLite, PostgreSQL, MySQL (sqlx 0.8 removed the MSSQL
 driver, so there is no `db-mssql` feature).
@@ -22,7 +22,7 @@ driver, so there is no `db-mssql` feature).
 
 ```toml
 [dependencies]
-vivarium = "0.1"          # default features: web, config, db, db-sqlite, db-postgres
+vivarium-rs = "0.1"       # default features: web, config, db, db-sqlite, db-postgres
 axum = "0.8"
 sqlx = { version = "0.8", features = ["sqlite"] }
 tokio = { version = "1", features = ["full"] }
@@ -36,10 +36,10 @@ garde = { version = "0.22", features = ["derive"] }
 use axum::{Router, routing::post};
 use serde::Deserialize;
 use garde::Validate;
-use vivarium::{ApiError, Initializer, Varser, create};
-use vivarium::sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use vivarium_rs::{ApiError, Initializer, Varser, create};
+use vivarium_rs::sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
-#[derive(Clone, sqlx::FromRow, vivarium::Entity)]
+#[derive(Clone, sqlx::FromRow, vivarium_rs::Entity)]
 #[entity(table = "users")]
 struct User {
     id: i64,
@@ -67,12 +67,12 @@ async fn create_user(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let pool = SqlitePoolOptions::new().connect("sqlite://app.db").await?;
-    vivarium::MIGRATOR.run(&pool).await?;
+    vivarium_rs::MIGRATOR.run(&pool).await?;
     let app = Router::new()
         .route("/users", post(create_user))
         .with_state(pool);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
-    vivarium::serve(listener, app).await?;
+    vivarium_rs::serve(listener, app).await?;
     Ok(())
 }
 ```
@@ -82,7 +82,7 @@ Invalid bodies get `422 {"code":"VALIDATION","message":"[name]: [length is lower
 ### 2. Chainable queries
 
 ```rust,no_run
-use vivarium::{Column, Order, Query, Sorter};
+use vivarium_rs::{Column, Order, Query, Sorter};
 
 #[derive(Clone, Copy)]
 enum UserCol { Name, Age }
@@ -92,7 +92,7 @@ impl Column for UserCol {
     }
 }
 
-async fn active_above(pool: &vivarium::sqlx::sqlite::SqlitePool, age: i64) -> sqlx::Result<Vec<User>> {
+async fn active_above(pool: &vivarium_rs::sqlx::sqlite::SqlitePool, age: i64) -> sqlx::Result<Vec<User>> {
     Query::<_, User>::new()
         .where_eq(UserCol::Age, age)          // compile-time checked bind type
         .order_by(Sorter::new(UserCol::Name, Order::Desc))
@@ -109,7 +109,7 @@ injection is impossible. `Query` also has `first`, `count`, and `paginate`.
 
 ```rust,no_run
 let page = Query::<_, User>::new()
-    .paginate(vivarium::Pagination::new(2, 20), &pool)
+    .paginate(vivarium_rs::Pagination::new(2, 20), &pool)
     .await?;
 // page.total, page.content, page.pages(); out-of-range sizes normalized
 ```
@@ -117,20 +117,20 @@ let page = Query::<_, User>::new()
 ### 4. JWT in three lines
 
 ```rust,no_run
-use vivarium::jwt::{decode_token, sign_token};
+use vivarium_rs::jwt::{decode_token, sign_token};
 
 let token = sign_token(&Claims { sub: "ada".into(), exp: 0 }, SECRET)?;
 let claims: Claims = decode_token(&token, SECRET)?;   // HS256 fixed; RS256 rejected
 ```
 
-Or as middleware: `.route_layer(vivarium::jwt::jwt_auth::<Claims>(SECRET.into()))`
+Or as middleware: `.route_layer(vivarium_rs::jwt::jwt_auth::<Claims>(SECRET.into()))`
 puts the decoded claims into request extensions.
 
 ### 5. Hot-reloadable config
 
 ```rust,no_run
 use std::sync::Arc;
-use vivarium::Config;
+use vivarium_rs::Config;
 
 #[derive(serde::Deserialize)]
 struct AppConfig {
@@ -154,7 +154,7 @@ HTTP/1.1 422 Unprocessable Entity
 
 Internal details stay server-side: `ApiError::Internal { system }` only
 appears in the response while debug mode is on (`VIVARIUM_DEBUG=1` or
-`vivarium::set_debug_mode(true)`).
+`vivarium_rs::set_debug_mode(true)`).
 
 ## Features
 
@@ -178,7 +178,7 @@ reshuffling are also intentionally absent.
 ## Release order
 
 `vivarium-core` → `vivarium-macros` → `vivarium-db` → `vivarium-web` →
-`vivarium-config` → `vivarium`.
+`vivarium-config` → `vivarium-rs`.
 
 ## License
 
@@ -192,4 +192,4 @@ MIT.
 [`vivarium-db`]: https://docs.rs/vivarium-db
 [`vivarium-web`]: https://docs.rs/vivarium-web
 [`vivarium-config`]: https://docs.rs/vivarium-config
-[`vivarium`]: https://docs.rs/vivarium
+[`vivarium-rs`]: https://docs.rs/vivarium-rs

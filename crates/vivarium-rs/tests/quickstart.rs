@@ -1,6 +1,6 @@
 //! End-to-end acceptance: the README quick-start service — SQLite + axum +
 //! Varser + CRUD — must actually run. Mirrors the plan's Phase 5 criterion:
-//! from `cargo add vivarium`, the example works.
+//! from `cargo add vivarium-rs`, the example works.
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::{Router, routing::get, routing::post};
@@ -8,10 +8,10 @@ use garde::Validate;
 use http_body_util::BodyExt;
 use serde::Deserialize;
 use tower::ServiceExt;
-use vivarium::sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
-use vivarium::{ApiError, Initializer, Varser, create};
+use vivarium_rs::sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use vivarium_rs::{ApiError, Initializer, Varser, create};
 
-#[derive(Clone, sqlx::FromRow, vivarium::Entity)]
+#[derive(Clone, sqlx::FromRow, vivarium_rs::Entity)]
 #[entity(table = "users")]
 struct User {
     id: i64,
@@ -45,7 +45,7 @@ async fn create_user(
 }
 
 async fn count_users(state: axum::extract::State<SqlitePool>) -> Result<String, ApiError> {
-    let n = vivarium::count::<User, _>(&state.0)
+    let n = vivarium_rs::count::<User, _>(&state.0)
         .await
         .map_err(|e| ApiError::Internal {
             system: e.to_string(),
@@ -59,7 +59,7 @@ async fn app() -> (Router, SqlitePool) {
         .connect("sqlite::memory:")
         .await
         .expect("pool");
-    vivarium::MIGRATOR.run(&pool).await.expect("migrate");
+    vivarium_rs::MIGRATOR.run(&pool).await.expect("migrate");
     let router = Router::new()
         .route("/users", post(create_user))
         .route("/users/count", get(count_users))
@@ -103,7 +103,7 @@ async fn quickstart_service_runs() {
         .to_bytes();
     assert_eq!(bytes, "1");
 
-    let rows: i64 = vivarium::sqlx::query_scalar("SELECT COUNT(*) FROM users")
+    let rows: i64 = vivarium_rs::sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(&pool)
         .await
         .expect("count");

@@ -5,7 +5,7 @@ members = [
     "crates/vivarium-db",
     "crates/vivarium-web",
     "crates/vivarium-config",
-    "crates/vivarium",
+    "crates/vivarium-rs",
 ]
 resolver = "3"
 

@@ -2325,24 +2325,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "vivarium"
-version = "0.1.0"
-dependencies = [
- "axum",
- "garde",
- "http-body-util",
- "serde",
- "sqlx",
- "tokio",
- "tower",
- "vivarium-config",
- "vivarium-core",
- "vivarium-db",
- "vivarium-macros",
- "vivarium-web",
-]
-
-[[package]]
 name = "vivarium-config"
 version = "0.1.0"
 dependencies = [
@@ -2387,6 +2369,24 @@ dependencies = [
  "syn 2.0.119",
  "trybuild",
  "vivarium-core",
+]
+
+[[package]]
+name = "vivarium-rs"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "garde",
+ "http-body-util",
+ "serde",
+ "sqlx",
+ "tokio",
+ "tower",
+ "vivarium-config",
+ "vivarium-core",
+ "vivarium-db",
+ "vivarium-macros",
+ "vivarium-web",
 ]
 
 [[package]]

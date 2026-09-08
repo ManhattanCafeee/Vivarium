@@ -1,13 +1,13 @@
 //! # vivarium-config
 //!
-//! Typed, hot-reloadable configuration for the [`vivarium`] family.
+//! Typed, hot-reloadable configuration for the [`vivarium-rs`] family.
 //! Built on [`figment`] (TOML/YAML/JSON), [`notify`] (file watching), and
 //! [`arc-swap`](https://docs.rs/arc-swap) (lock-free reads).
 //!
 //! Reads via [`Config::get`] are lock-free; reloads atomically swap in a new
 //! value and notify registered handlers in registration order.
 //!
-//! [`vivarium`]: https://docs.rs/vivarium
+//! [`vivarium-rs`]: https://docs.rs/vivarium-rs
 
 #![deny(missing_docs)]
 

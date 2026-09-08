@@ -4,7 +4,7 @@
 //! contract, extractors that deserialize + initialize + validate in one
 //! pipeline, JWT authentication middleware, and a `Cache-Control` layer.
 //!
-//! [`vivarium`]: https://docs.rs/vivarium
+//! [`vivarium-rs`]: https://docs.rs/vivarium-rs
 #![deny(missing_docs)]
 
 pub mod cache;

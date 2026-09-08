@@ -46,7 +46,7 @@
 //! corresponding driver. The whole crate compiles with none of them enabled;
 //! everything except running queries works without a driver.
 //!
-//! [`vivarium`]: https://docs.rs/vivarium
+//! [`vivarium-rs`]: https://docs.rs/vivarium-rs
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 

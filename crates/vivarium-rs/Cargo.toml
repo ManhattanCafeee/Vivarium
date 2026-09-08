@@ -1,12 +1,12 @@
 [package]
-name = "vivarium"
+name = "vivarium-rs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Facade crate: re-exports the vivarium family behind feature flags."
+description = "vivarium-rs facade: feature-gated re-exports of the vivarium family."
 
 [features]
 default = ["web", "config", "db", "db-sqlite", "db-postgres"]

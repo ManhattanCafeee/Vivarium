@@ -1,13 +1,13 @@
 //! # vivarium-core
 //!
-//! Core value types for the [`vivarium`] family: pagination, ordering, bindable
+//! Core value types for the [`vivarium-rs`] family: pagination, ordering, bindable
 //! column values, and the [`Entity`] contract shared by [`vivarium-db`] and
 //! [`vivarium-web`].
 //!
 //! This crate has no database or HTTP dependencies; it is the shared
 //! vocabulary of the family.
 //!
-//! [`vivarium`]: https://docs.rs/vivarium
+//! [`vivarium-rs`]: https://docs.rs/vivarium-rs
 //! [`vivarium-db`]: https://docs.rs/vivarium-db
 //! [`vivarium-web`]: https://docs.rs/vivarium-web
 #![deny(missing_docs)]
