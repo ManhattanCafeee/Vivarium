@@ -40,7 +40,7 @@ pub trait Binder: Send + Sync {
     type DB: Database;
 
     /// Pushes this binder's values onto the query builder.
-    fn bind<'x>(&self, qb: &mut QueryBuilder<'x, Self::DB>);
+    fn bind(&self, qb: &mut QueryBuilder<'_, Self::DB>);
 }
 
 /// Binder alias with the database type fixed.
@@ -63,7 +63,7 @@ where
 {
     type DB = DB;
 
-    fn bind<'x>(&self, qb: &mut QueryBuilder<'x, Self::DB>) {
+    fn bind(&self, qb: &mut QueryBuilder<'_, Self::DB>) {
         qb.push_bind(self.value.clone());
     }
 }
@@ -80,7 +80,7 @@ pub struct ValueBinder<DB> {
 impl<DB: DriverOps> Binder for ValueBinder<DB> {
     type DB = DB;
 
-    fn bind<'x>(&self, qb: &mut QueryBuilder<'x, Self::DB>) {
+    fn bind(&self, qb: &mut QueryBuilder<'_, Self::DB>) {
         DB::bind_value(qb, self.value.clone());
     }
 }
@@ -128,7 +128,7 @@ pub trait DriverOps: Database + private::Sealed + Sized {
     fn rows_affected(result: &Self::QueryResult) -> u64;
 
     /// Binds a [`Value`] onto a query builder with driver-correct types.
-    fn bind_value<'q>(qb: &mut QueryBuilder<'q, Self>, value: Value);
+    fn bind_value(qb: &mut QueryBuilder<'_, Self>, value: Value);
 
     /// Runs the built INSERT and returns the generated (or provided) id.
     fn generated_id<'c, E>(
@@ -223,7 +223,7 @@ macro_rules! impl_driver_ops {
                 result.rows_affected()
             }
 
-            fn bind_value<'q>(qb: &mut QueryBuilder<'q, Self>, value: Value) {
+            fn bind_value(qb: &mut QueryBuilder<'_, Self>, value: Value) {
                 match value {
                     Value::Null => {
                         qb.push_bind(Option::<i64>::None);
