@@ -1,10 +1,11 @@
 [package]
 name = "vivarium-core"
-version.workspace = true
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
 authors.workspace = true
 description = "Core types for vivarium: Page, Pagination, Order, Column, Sorter."
 

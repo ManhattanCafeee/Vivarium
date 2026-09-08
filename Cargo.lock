@@ -2326,7 +2326,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vivarium-config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "figment",
@@ -2340,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "vivarium-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2348,7 +2348,7 @@ dependencies = [
 
 [[package]]
 name = "vivarium-db"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "log",
  "serde_json",
@@ -2361,7 +2361,7 @@ dependencies = [
 
 [[package]]
 name = "vivarium-macros"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2373,7 +2373,7 @@ dependencies = [
 
 [[package]]
 name = "vivarium-rs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "garde",
@@ -2391,7 +2391,7 @@ dependencies = [
 
 [[package]]
 name = "vivarium-web"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
