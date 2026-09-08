@@ -1,6 +1,6 @@
 [package]
 name = "vivarium-db"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -22,7 +22,7 @@ mysql = ["sqlx/mysql"]
 log = "0.4.34"
 sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "json", "runtime-tokio"] }
 tracing = "0.1.44"
-vivarium-core = { version = "0.1.0", path = "../vivarium-core" }
+vivarium-core = { version = "0.1.2", path = "../vivarium-core" }
 vivarium-macros = { version = "0.1.0", path = "../vivarium-macros" }
 
 [dev-dependencies]

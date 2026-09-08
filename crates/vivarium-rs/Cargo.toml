@@ -1,6 +1,6 @@
 [package]
 name = "vivarium-rs"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -26,7 +26,7 @@ config = ["dep:vivarium-config"]
 
 [dependencies]
 vivarium-core = { version = "0.1.0", path = "../vivarium-core" }
-vivarium-db = { version = "0.1.0", path = "../vivarium-db", optional = true, default-features = false }
+vivarium-db = { version = "0.2.0", path = "../vivarium-db", optional = true, default-features = false }
 vivarium-web = { version = "0.1.0", path = "../vivarium-web", optional = true }
 vivarium-config = { version = "0.1.0", path = "../vivarium-config", optional = true }
 vivarium-macros = { version = "0.1.0", path = "../vivarium-macros" }
