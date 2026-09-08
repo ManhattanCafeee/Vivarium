@@ -1,0 +1,39 @@
+[package]
+name = "vivarium"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Facade crate: re-exports the vivarium family behind feature flags."
+
+[features]
+default = ["web", "config", "db", "db-sqlite", "db-postgres"]
+# The core database layer (no driver).
+db = ["dep:vivarium-db"]
+# SQLite driver.
+db-sqlite = ["db", "vivarium-db/sqlite"]
+# PostgreSQL driver.
+db-postgres = ["db", "vivarium-db/postgres"]
+# MySQL driver.
+db-mysql = ["db", "vivarium-db/mysql"]
+# axum web layer.
+web = ["dep:vivarium-web"]
+# Hot-reloadable config.
+config = ["dep:vivarium-config"]
+
+[dependencies]
+vivarium-core = { version = "0.1.0", path = "../vivarium-core" }
+vivarium-db = { version = "0.1.0", path = "../vivarium-db", optional = true, default-features = false }
+vivarium-web = { version = "0.1.0", path = "../vivarium-web", optional = true }
+vivarium-config = { version = "0.1.0", path = "../vivarium-config", optional = true }
+vivarium-macros = { version = "0.1.0", path = "../vivarium-macros" }
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["json"] }
+http-body-util = "0.1.5"
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate", "json"] }
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5.3", features = ["util"] }
+validator = { version = "0.20.0", features = ["derive"] }

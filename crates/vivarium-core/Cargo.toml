@@ -1,0 +1,12 @@
+[package]
+name = "vivarium-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Core types for vivarium: Page, Pagination, Order, Column, Sorter."
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
