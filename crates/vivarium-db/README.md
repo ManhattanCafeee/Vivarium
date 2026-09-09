@@ -43,7 +43,11 @@ Column names can only come from a `Column` enum — SQL injection via
 sort/where columns is impossible at compile time.
 
 Generic helpers included: `create`, `update_by_id`, `delete`,
-`find_by_id`, `count`, `exists`, plus an example migrator
+`find_by_id`, `count`, `exists`, plus
+`is_unique_violation(&sqlx::Error)` — driver-agnostic (MySQL 1062,
+PostgreSQL 23505, SQLite constraint codes) detection of unique/primary-key
+violations, the standard "pre-check then insert" race fallback, which the
+web layer maps to `ApiError::Conflict` (409). And an example migrator
 (`vivarium_db::MIGRATOR`) applied with `sqlx::migrate!`.
 
 MSRV: Rust 1.85.

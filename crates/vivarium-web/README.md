@@ -2,7 +2,9 @@
 
 HTTP ergonomics on top of [axum](https://github.com/tokio-rs/axum): a unified
 `ApiError` response contract, extractors that deserialize + initialize +
-validate in one pipeline, JWT authentication, and a `Cache-Control` layer.
+validate in one pipeline, JWT + cookie-session authentication,
+refresh-token rotation, RBAC permission wildcards, password hashing, and a
+`Cache-Control` layer.
 
 ## Quick start
 
@@ -35,11 +37,22 @@ The `code` field is the machine contract; the message is human-readable.
 ## What's inside
 
 - `ApiError` — one error type, one JSON shape
-  (`{"code","message"}`, plus `system` only in debug mode)
+  (`{"code","message"}`, plus `system` only in debug mode); codes:
+  `NOT_FOUND`, `BAD_REQUEST`, `UNAUTHORIZED` (401), `FORBIDDEN` (403),
+  `CONFLICT` (409), `VALIDATION`, `INTERNAL`
 - `Varser` / `QueryVarser` / `PathVarser` / `FormVarser` — body/query/path/form
   extractors running deserialize → initialize → validate
 - `jwt` — HS256 sign/verify (`sign_token` / `decode_token`, RS256 rejected)
-  and `jwt_auth` middleware inserting claims into extensions
+  and `jwt_auth` middleware inserting claims into extensions (failures → 401)
+- `session` — cookie sessions with sliding renewal: `SessionAuth`,
+  `SessionStore` (app-owned table), `session_layer`, `SessionCtx` /
+  `OptionalSessionCtx`; expired sessions are deleted, stale cookies cleared
+- `token` — single-use refresh-token rotation: `RefreshTokenManager`,
+  `RefreshTokenStore`, `TokenPair`; a replayed or raced token fails 401
+- `authz` — RBAC permission wildcards: `perms_match` (`*`, exact,
+  `prefix:*`) and `PermissionSet` with `require` → 403
+- `password` — Argon2 `hash` / `verify` / `verify_login`; the unknown-user
+  login path verifies a dummy hash, defeating username-enumeration timing
 - `Cache { seconds }` — tower layer emitting `Cache-Control`
 - `serve` — startup helper returning `Result`
 

@@ -1,8 +1,9 @@
 # vivarium
 
 Type-safe ergonomics on top of [sqlx] and [axum]: pagination, sorting
-whitelists, unified errors, validated extractors, generic CRUD, and
-hot-reloadable config. A Rust port of the Go [natools4go] toolset — but the
+whitelists, unified errors, validated extractors, generic CRUD, cookie
+sessions with sliding renewal, refresh-token rotation, and hot-reloadable
+config. A Rust port of the Go [natools4go] toolset — but the
 value is not in ported utility functions (Rust's ecosystem covers those), it
 is in the type-safe layer built on sqlx/axum.
 
@@ -11,7 +12,7 @@ is in the type-safe layer built on sqlx/axum.
 | [`vivarium-core`] | `Page<T>` / `Pagination` / `Order` / `Column` / `Sorter` / `Entity` / `Value` |
 | [`vivarium-macros`] | `#[derive(Entity)]` |
 | [`vivarium-db`] | sqlx: generic CRUD, chainable queries, pagination, migrations |
-| [`vivarium-web`] | axum: `ApiError`, `Varser`, JWT auth, `Cache-Control` layer |
+| [`vivarium-web`] | axum: `ApiError`, `Varser`, JWT + session auth, refresh tokens, RBAC permissions, password hashing, `Cache-Control` layer |
 | [`vivarium-config`] | figment + notify + arc-swap hot reload |
 | [`vivarium-rs`] | the facade: `cargo add vivarium-rs` is all you need |
 
@@ -126,7 +127,31 @@ let claims: Claims = decode_token(&token, SECRET)?;   // HS256 fixed; RS256 reje
 Or as middleware: `.route_layer(vivarium_rs::jwt::jwt_auth::<Claims>(SECRET.into()))`
 puts the decoded claims into request extensions.
 
-### 5. Hot-reloadable config
+### 5. Sessions with sliding renewal
+
+```rust,no_run
+use std::time::Duration;
+use axum::{Router, routing::get};
+use vivarium_rs::{SessionAuth, SessionCtx, session_layer};
+
+let auth = SessionAuth::new(my_store, "sid", Duration::from_hours(24)); // SessionStore is app-owned
+let app = Router::new().route("/me", get(|SessionCtx { user_id }: SessionCtx| user_id.to_string()))
+    .layer(session_layer(auth));
+```
+
+The middleware looks up the session (deleting expired ones), refreshes the
+cookie after half the TTL is used, and never rejects — the `SessionCtx`
+extractor answers 401 (`OptionalSessionCtx` for optional-login routes).
+Logins call `auth.start(user_id)` and set the cookie via
+`auth.set_cookie_value(id)`.
+
+Single-use refresh-token rotation and Argon2 password hashing ride along:
+`RefreshTokenManager::new(store, secret, access_ttl, refresh_ttl)`
+(`rotate` consumes the token; a replayed one fails the delete 401) and
+`verify_login(password, user_hash.as_deref())`, which keeps the
+unknown-user path constant-time against username enumeration.
+
+### 6. Hot-reloadable config
 
 ```rust,no_run
 use std::sync::Arc;
@@ -143,7 +168,7 @@ config.clone().watch()?;          // watches the file, re-loads, fires handlers
 let cfg = config.get();           // lock-free Arc read
 ```
 
-### 6. Validation errors
+### 7. Validation errors
 
 `Varser` rejects with `422` and a Go-style message — `[field]: [rule]`:
 

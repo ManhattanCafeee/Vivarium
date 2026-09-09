@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 readme = "README.md"
 authors.workspace = true
-description = "axum ergonomics for vivarium: ApiError, validated extractors, JWT auth, cache layer."
+description = "axum ergonomics for vivarium: ApiError, validated extractors, JWT + session auth, refresh tokens, RBAC, password hashing, cache layer."
 
 [dependencies]
 argon2 = "0.5.3"
