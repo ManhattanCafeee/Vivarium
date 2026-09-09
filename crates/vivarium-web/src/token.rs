@@ -98,10 +98,10 @@ pub trait RefreshTokenStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<bool, ApiError>> + Send + 'a;
 
     /// Deletes every token of a user (logout / password change).
-    fn remove_by_user<'a>(
-        &'a self,
+    fn remove_by_user(
+        &self,
         user_id: i64,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send + 'a;
+    ) -> impl Future<Output = Result<(), ApiError>> + Send + '_;
 }
 
 /// Issues and rotates access + refresh token pairs.

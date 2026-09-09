@@ -128,10 +128,10 @@ pub trait SessionStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), ApiError>> + Send + 'a;
 
     /// Deletes every session of a user (logout everywhere).
-    fn remove_by_user<'a>(
-        &'a self,
+    fn remove_by_user(
+        &self,
         user_id: i64,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send + 'a;
+    ) -> impl Future<Output = Result<(), ApiError>> + Send + '_;
 }
 
 /// Session configuration and the cookie/start/end operations of an
