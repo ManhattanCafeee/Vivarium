@@ -79,3 +79,52 @@ pub type Error = sqlx::Error;
 ///
 /// Apply with [`sqlx::migrate::Migrator::run`] against a connection or pool.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// Returns true if `err` is a unique or primary-key constraint violation.
+///
+/// Delegates to sqlx's driver-agnostic
+/// [`sqlx::error::DatabaseError::is_unique_violation`]; with a driver feature
+/// enabled, MySQL (1062), PostgreSQL (23505), and SQLite (extended
+/// `SQLITE_CONSTRAINT_UNIQUE`/`SQLITE_CONSTRAINT_PRIMARYKEY`) all report it.
+pub fn is_unique_violation(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .is_some_and(|e| e.is_unique_violation())
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod violation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unique_violation_detected() {
+        use sqlx::sqlite::SqlitePoolOptions;
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT UNIQUE)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t (id, name) VALUES (1, 'a')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let dup_name = sqlx::query("INSERT INTO t (id, name) VALUES (2, 'a')")
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert!(is_unique_violation(&dup_name));
+
+        let dup_pk = sqlx::query("INSERT INTO t (id, name) VALUES (1, 'b')")
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert!(is_unique_violation(&dup_pk));
+
+        assert!(!is_unique_violation(&sqlx::Error::RowNotFound));
+    }
+}

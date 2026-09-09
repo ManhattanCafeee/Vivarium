@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 ///
 /// plus a `system` field carrying internal details, but only while debug mode is
 /// enabled (see [`set_debug_mode`]).
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum ApiError {
     /// The requested resource does not exist.
     #[error("{0}")]
@@ -26,6 +26,19 @@ pub enum ApiError {
     /// The request itself is malformed (bad body, bad token, ...).
     #[error("{0}")]
     BadRequest(String),
+
+    /// Authentication required or credentials are invalid.
+    #[error("{0}")]
+    Unauthorized(String),
+
+    /// The authenticated principal lacks the permission to perform the action.
+    #[error("{0}")]
+    Forbidden(String),
+
+    /// The request conflicts with the current state of the resource
+    /// (e.g. a unique constraint violation).
+    #[error("{0}")]
+    Conflict(String),
 
     /// The request payload failed deserialization or validation.
     ///
@@ -49,6 +62,9 @@ impl ApiError {
         match self {
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -59,6 +75,9 @@ impl ApiError {
         match self {
             ApiError::NotFound(_) => "NOT_FOUND",
             ApiError::BadRequest(_) => "BAD_REQUEST",
+            ApiError::Unauthorized(_) => "UNAUTHORIZED",
+            ApiError::Forbidden(_) => "FORBIDDEN",
+            ApiError::Conflict(_) => "CONFLICT",
             ApiError::Validation(_) => "VALIDATION",
             ApiError::Internal { .. } => "INTERNAL",
         }
@@ -156,6 +175,19 @@ mod tests {
                 "BAD_REQUEST",
                 "bad",
             ),
+            (
+                ApiError::Unauthorized("login required".into()),
+                401,
+                "UNAUTHORIZED",
+                "login required",
+            ),
+            (
+                ApiError::Forbidden("insufficient".into()),
+                403,
+                "FORBIDDEN",
+                "insufficient",
+            ),
+            (ApiError::Conflict("dup".into()), 409, "CONFLICT", "dup"),
             (
                 ApiError::Validation("bad email".into()),
                 422,

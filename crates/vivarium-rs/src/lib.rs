@@ -9,9 +9,9 @@
 //!
 //! | Feature | Provides |
 //! |---|---|
-//! | `db` | [`Query`] and the CRUD helpers, no driver |
+//! | `db` | [`Query`], the CRUD helpers, and unique-violation detection, no driver |
 //! | `db-sqlite` / `db-postgres` / `db-mysql` | driver-enabled `db` layer |
-//! | `web` | [`ApiError`], [`Varser`], JWT auth, cache layer |
+//! | `web` | [`ApiError`], [`Varser`], JWT + session auth, refresh tokens, RBAC permissions, password hashing, cache layer |
 //! | `config` | [`Config`] |
 //!
 //! Default features: `web`, `config`, `db`, `db-sqlite`, `db-postgres`.
@@ -85,16 +85,18 @@ pub use vivarium_core::{Column, Entity, Order, Page, Pagination, Sorter, Value};
 
 #[cfg(feature = "db")]
 pub use vivarium_db::{
-    Error as DbError, MIGRATOR, Query, count, create, delete, exists, find_by_id, sqlx,
-    update_by_id,
+    Error as DbError, MIGRATOR, Query, count, create, delete, exists, find_by_id,
+    is_unique_violation, sqlx, update_by_id,
 };
 
 pub use vivarium_macros::Entity;
 
 #[cfg(feature = "web")]
 pub use vivarium_web::{
-    ApiError, FormVarser, Initializer, PathVarser, QueryVarser, Varser, cache, get_authorization,
-    jwt, serve,
+    ApiError, FormVarser, Initializer, OptionalSessionCtx, PathVarser, PermissionSet, QueryVarser,
+    RefreshTokenManager, RefreshTokenRecord, RefreshTokenStore, SessionAuth, SessionCtx,
+    SessionRecord, SessionStore, TokenPair, Varser, authz, cache, get_authorization, hash, jwt,
+    password, perms_match, serve, session, session_layer, token, verify, verify_login,
 };
 
 #[cfg(feature = "config")]

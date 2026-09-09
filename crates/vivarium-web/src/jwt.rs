@@ -31,7 +31,7 @@ pub fn decode_token<T: DeserializeOwned>(token: &str, secret: &str) -> Result<T,
     let validation = Validation::new(Algorithm::HS256);
     decode::<T>(token, &key, &validation)
         .map(|data| data.claims)
-        .map_err(|err| ApiError::BadRequest(format!("invalid token: {err}")))
+        .map_err(|err| ApiError::Unauthorized(format!("invalid token: {err}")))
 }
 
 /// The boxed future returned by the JWT authentication middleware.
@@ -61,7 +61,7 @@ where
 {
     Box::pin(async move {
         let token = bearer_token(req.headers())
-            .ok_or_else(|| ApiError::BadRequest("missing or invalid bearer token".to_string()))?;
+            .ok_or_else(|| ApiError::Unauthorized("missing or invalid bearer token".to_string()))?;
         let claims: T = decode_token(token, &secret)?;
         req.extensions_mut().insert(claims);
         Ok(next.run(req).await)
@@ -91,7 +91,7 @@ where
 /// # }
 /// ```
 ///
-/// Failures produce an [`ApiError::BadRequest`]("missing or invalid bearer
+/// Failures produce an [`ApiError::Unauthorized`]("missing or invalid bearer
 /// token") response.
 pub fn jwt_auth<T>(secret: String) -> JwtAuthLayer
 where
@@ -149,7 +149,7 @@ mod tests {
         };
         let token = sign_token(&claims, SECRET).expect("sign token");
         let err = decode_token::<Claims>(&token, SECRET).expect_err("must reject expired token");
-        assert!(matches!(err, ApiError::BadRequest(_)));
+        assert!(matches!(err, ApiError::Unauthorized(_)));
     }
 
     #[tokio::test]
@@ -171,7 +171,7 @@ mod tests {
         let token = format!("{signing_input}.{signature}");
 
         let err = decode_token::<Claims>(&token, SECRET).expect_err("must reject RS256 token");
-        assert!(matches!(err, ApiError::BadRequest(_)));
+        assert!(matches!(err, ApiError::Unauthorized(_)));
     }
 
     #[tokio::test]
@@ -200,12 +200,20 @@ mod tests {
             .to_bytes();
         assert_eq!(&bytes[..], b"alice");
 
-        // Missing token → error response.
+        // Missing token → 401 with the UNAUTHORIZED code.
         let req = Request::builder().uri("/me").body(Body::empty()).unwrap();
         let response = app.clone().oneshot(req).await.expect("request succeeds");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("error body is json");
+        assert_eq!(body["code"], "UNAUTHORIZED");
 
-        // Wrong secret / invalid token → error response.
+        // Wrong secret / invalid token → 401.
         let bad = sign_token(&fresh_claims("mallory"), "wrong-secret").expect("sign token");
         let req = Request::builder()
             .uri("/me")
@@ -213,6 +221,6 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(req).await.expect("request succeeds");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
