@@ -24,7 +24,8 @@
 //! - `#[entity(rename = "col")]` (field): override the column name. Defaults
 //!   to the field name.
 //! - `#[entity(json)]` (field): serialize the field via `serde_json` into a
-//!   JSON column instead of requiring a natively supported type.
+//!   JSON column instead of requiring a natively supported type. Applied before
+//!   the `Option<T>` handling, so a `None` becomes JSON `null`, not SQL `NULL`.
 //!
 //! `chrono::DateTime<Utc>`, `chrono::NaiveDate` and `uuid::Uuid` are
 //! recognised **by the last path segment of the field type** (`DateTime`,
@@ -38,7 +39,10 @@
 //! field whose type is not supported is rejected with the list of supported
 //! types. `Option<T>` fields bind as typed `NULL`s
 //! (`Value::TypedNull(NullType::…)`) so that drivers which check parameter
-//! types accept them; `#[entity(json)]` fields need `T: Serialize` and report
+//! types accept them — except under `#[entity(json)]`, which is applied first:
+//! a `None` there serializes to JSON `null` instead. Use a plain
+//! `Option<serde_json::Value>` field without the attribute when you need SQL
+//! `NULL`. `#[entity(json)]` fields need `T: Serialize` and report
 //! a serialization failure as `EncodeError` instead of panicking.
 //!
 //! # Example

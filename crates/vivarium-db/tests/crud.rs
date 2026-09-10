@@ -189,6 +189,71 @@ async fn a_json_field_that_cannot_serialize_is_an_encode_error() {
     );
 }
 
+/// The `#[entity(json)]` attribute is applied before the `Option<T>` handling,
+/// so the two fields below encode `None` differently — JSON `null` on the
+/// marked one, a typed SQL `NULL` on the plain one. That asymmetry is
+/// documented; this pins it.
+#[derive(Debug, sqlx::FromRow, vivarium_db::Entity)]
+#[entity(table = "json_nulls", crate = "vivarium_db")]
+struct JsonNulls {
+    #[entity(id)]
+    id: i64,
+    #[entity(json)]
+    marked: Option<serde_json::Value>,
+    plain: Option<serde_json::Value>,
+}
+
+#[tokio::test]
+async fn a_json_marked_none_is_json_null_while_a_plain_none_is_sql_null() {
+    let pool = pool().await;
+    sqlx::query(
+        "CREATE TABLE json_nulls (id INTEGER PRIMARY KEY, marked TEXT NULL, plain TEXT NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("schema");
+
+    let encoded = JsonNulls {
+        id: 0,
+        marked: None,
+        plain: None,
+    }
+    .columns_and_values()
+    .expect("both fields encode");
+    assert_eq!(
+        encoded,
+        vec![
+            ("marked", Value::Json(serde_json::Value::Null)),
+            ("plain", Value::TypedNull(NullType::Json)),
+        ]
+    );
+
+    create(
+        &pool,
+        JsonNulls {
+            id: 0,
+            marked: None,
+            plain: None,
+        },
+    )
+    .await
+    .expect("create");
+
+    let (marked_is_null, plain_is_null): (i64, i64) =
+        sqlx::query_as("SELECT marked IS NULL, plain IS NULL FROM json_nulls")
+            .fetch_one(&pool)
+            .await
+            .expect("read back");
+    assert_eq!(
+        marked_is_null, 0,
+        "the marked column stores JSON null, which is a value, not SQL NULL"
+    );
+    assert_eq!(
+        plain_is_null, 1,
+        "the unmarked column binds a typed SQL NULL"
+    );
+}
+
 /// An entity whose non-id `u64` field bounds to `Value::I64`. Values above
 /// `i64::MAX` have no `i64` representation and must be reported instead of
 /// wrapping to a negative number.

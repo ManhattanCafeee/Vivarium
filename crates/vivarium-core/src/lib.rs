@@ -304,7 +304,9 @@ impl<T> Page<T> {
 /// [`Text`], `Vec<u8>` onto [`Bytes`], `bool` onto [`Bool`], and
 /// `serde_json::Value` onto [`Json`]. `Option<T>` maps to [`TypedNull`] with
 /// the matching [`NullType`], so drivers that type-check parameters
-/// (PostgreSQL) accept the comparison.
+/// (PostgreSQL) accept the comparison. A `#[entity(json)]` field is serialized
+/// before that check, so its `None` becomes [`Json`] holding JSON `null`
+/// instead of a typed SQL `NULL`.
 ///
 /// The blanket `From` impls convert integers with `as i64`, so `u64`/`usize`
 /// above `i64::MAX` wrap; primary keys go through
