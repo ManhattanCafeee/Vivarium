@@ -4,6 +4,27 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.1 — 2026-09-10
+
+### Fixed
+
+- `PathVarser`/`QueryVarser` and the garde `GardePathVarser`/`GardeQueryVarser`
+  now implement `FromRequestParts`, so handlers that combine a path or query
+  extractor with a body extractor compile — `(PathVarser<P>, Varser<B>)` used to
+  fail with `E0277`. `Varser`/`FormVarser` and their garde twins still consume
+  the body and remain limited to the last argument.
+
+### Changed
+
+- Docs: the session renewal comment no longer claims the renewal can only move
+  forward (the clock is re-read after the handler), and the extractor module
+  documents which extractors read the body.
+
+### Added
+
+- Tests only: a dev-dependency on `vivarium-core` (with `utoipa`) so the golden
+  spec pins the composed `ApiResponse_Page_User` name.
+
 ## 0.3.0 — 2026-09-10
 
 ### Breaking

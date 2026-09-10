@@ -4,6 +4,13 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.1 — 2026-09-10
+
+### Changed
+
+- Re-exports follow the 0.3.1 crates (`vivarium-core`/`-macros`/`-db`/`-web`/
+  `-config`). No API changes in the facade itself.
+
 ## 0.3.0 — 2026-09-10
 
 ### Breaking

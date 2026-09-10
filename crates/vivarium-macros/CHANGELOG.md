@@ -4,6 +4,22 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.1 — 2026-09-10
+
+### Fixed
+
+- `#[derive(Entity)]`: a non-primary-key `u64`/`usize`/`isize` field is now
+  converted with `i64::try_from` and reported as an `EncodeError` naming the
+  column, instead of silently wrapping (`u64::MAX` used to bind `I64(-1)`).
+  Code generated for `i8..u32` and `i64` is unchanged, and the derive's
+  diagnostics are untouched.
+
+### Changed
+
+- Docs: `#[entity(json)]` is documented as taking precedence over the
+  `Option<T>` handling (a `None` becomes JSON `null`, not SQL `NULL`), so a
+  plain `Option<serde_json::Value>` is the way to a nullable JSON column.
+
 ## 0.3.0 — 2026-09-10
 
 ### Breaking

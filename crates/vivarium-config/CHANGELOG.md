@@ -4,6 +4,17 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.1 — 2026-09-10
+
+### Fixed
+
+- A panicking user provider no longer kills the watcher thread: the reload runs
+  under `catch_unwind`, the panic is reported through
+  `ConfigError::HandlerPanic` (whose documentation and message now cover
+  providers as well as handlers), the previous value stays in place, and
+  watching continues. Previously the thread died silently — later file changes
+  triggered nothing and `on_error` never fired.
+
 ## 0.3.0 — 2026-09-10
 
 ### Breaking

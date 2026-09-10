@@ -4,6 +4,24 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.1 — 2026-09-10
+
+### Fixed
+
+- `Pagination::limit_offset` no longer panics in debug or wraps in release for
+  values that bypassed normalization: it normalizes internally (`page` 0 reads
+  as 1, `per_page` 0 as `DEFAULT_PER_PAGE`) and saturates the offset
+  arithmetic, so `Pagination { page: 0, per_page: 0 }.limit_offset()` is
+  `(20, 0)` instead of `attempt to subtract with overflow`.
+
+### Changed
+
+- Docs: the private `PaginationArgs` note no longer claims the normalization
+  invariant holds for every `Pagination` in existence, `limit_offset` documents
+  that it is safe for unnormalized input, and the `Value` docs record that a
+  `#[entity(json)]` field serializes `None` to JSON `null` rather than a typed
+  SQL `NULL`.
+
 ## 0.3.0 — 2026-09-10
 
 ### Breaking
