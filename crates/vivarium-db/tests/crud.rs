@@ -171,9 +171,12 @@ async fn a_json_field_that_cannot_serialize_is_an_encode_error() {
     .await
     .expect_err("a field that cannot be serialized must not insert");
 
+    let sqlx::Error::Encode(inner) = &error else {
+        panic!("the serialization failure must surface as Error::Encode, got {error:?}");
+    };
     assert!(
-        matches!(error, sqlx::Error::Encode(_)),
-        "the serialization failure must surface as Error::Encode, got {error:?}"
+        inner.to_string().contains("failed to serialize"),
+        "the encode error must come from the JSON column, got {inner}"
     );
     assert_eq!(
         count::<UnserializableProfile, _>(&pool)

@@ -1,5 +1,5 @@
 error: unknown #[entity] field attribute; expected `id`, `json`, `skip`, or `rename = "..."`
- --> tests/ui/fail/unknown_field_attr_on_id.rs:8:18
-  |
-8 |     #[entity(id, renam = "user_id")]
-  |                  ^^^^^
+  --> tests/ui/fail/unknown_field_attr_on_id.rs:12:18
+   |
+12 |     #[entity(id, renam = "user_id")]
+   |                  ^^^^^

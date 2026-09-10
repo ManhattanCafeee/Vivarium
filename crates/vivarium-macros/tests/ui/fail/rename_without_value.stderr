@@ -1,0 +1,5 @@
+error: expected `=`
+ --> tests/ui/fail/rename_without_value.rs:8:20
+  |
+8 |     #[entity(rename)]
+  |                    ^

@@ -5,8 +5,12 @@ use vivarium_macros::Entity;
 #[derive(Entity)]
 #[entity(crate = "vivarium_core")]
 struct User {
+    // Marked as the id and deliberately *not* named `id`: without validating
+    // every field's attributes up front, the typo would disqualify this
+    // candidate silently (`is_ok_and` swallows the parse error) and the derive
+    // would report a missing id field instead of the attribute mistake.
     #[entity(id, renam = "user_id")]
-    id: i64,
+    user_id: i64,
     name: String,
 }
 

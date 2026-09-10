@@ -1,0 +1,5 @@
+error: expected string literal
+ --> tests/ui/fail/rename_not_a_string.rs:8:23
+  |
+8 |     #[entity(rename = 12)]
+  |                       ^^

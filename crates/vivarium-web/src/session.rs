@@ -92,6 +92,7 @@ use axum::middleware::{self, FromFnLayer, Next};
 use axum::response::Response;
 use chrono::{DateTime, TimeDelta, Utc};
 use cookie::Cookie;
+use percent_encoding::percent_decode_str;
 
 pub use cookie::SameSite;
 
@@ -645,34 +646,31 @@ where
 
 /// Extracts a cookie's value from the `Cookie` request header.
 ///
-/// Parsing goes through the `cookie` crate rather than string surgery:
+/// Parsing goes through the `cookie` crate rather than string surgery, in the
+/// order the wire format demands:
 ///
-/// - Percent-encoded values are decoded (`split_parse_encoded`), symmetric with
-///   the [`encoded()`](cookie::Cookie::encoded) form [`SessionAuth`] writes, so
-///   an id that needed escaping on the way out is found again on the way in.
-/// - A value wrapped in double quotes is unquoted, as RFC 6265's
-///   `cookie-value` grammar allows; an unpaired quote is left alone, so a
-///   malformed cookie simply fails to match a session.
+/// - A value wrapped in double quotes is unquoted first, as RFC 6265's
+///   `cookie-value` grammar allows. The quotes are wire syntax, so doing this
+///   before decoding keeps an id that *itself* contains quotes (written escaped,
+///   as `%22…%22`) from being mistaken for a quoted value.
+/// - The unquoted value is then percent-decoded — the inverse of the
+///   [`encoded()`](cookie::Cookie::encoded) form [`SessionAuth`] writes — so an
+///   id that needed escaping on the way out is found again on the way in.
 /// - A value-less `name=` yields an empty string rather than being dropped: no
 ///   digest matches it, so the middleware treats it as a stale cookie and
-///   clears it.
+///   clears it. The same holds for a value whose escapes are not valid UTF-8:
+///   the replacement characters cannot match a session, and the junk cookie is
+///   cleared instead of ignored.
 /// - Segments that fail to parse (no `=`, an empty name) are skipped, and other
 ///   cookies are ignored.
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    let value = Cookie::split_parse_encoded(raw)
+    let value = Cookie::split_parse(raw)
         .filter_map(Result::ok)
-        .find(|cookie| cookie.name() == name)
-        .map(|cookie| cookie.value().to_string())?;
-    Some(unquote(&value).to_string())
-}
-
-/// Strips one pair of surrounding double quotes, leaving a lone quote alone.
-fn unquote(value: &str) -> &str {
-    value
-        .strip_prefix('"')
-        .and_then(|inner| inner.strip_suffix('"'))
-        .unwrap_or(value)
+        .find(|cookie| cookie.name() == name)?
+        .value_trimmed()
+        .to_string();
+    Some(percent_decode_str(&value).decode_utf8_lossy().into_owned())
 }
 
 /// Whether the response already sets the session cookie.
@@ -1341,6 +1339,43 @@ mod tests {
         let (status, response) = drive(app, req_get("/me", Some(&request_cookie))).await;
         assert_eq!(status, StatusCode::OK, "cookie: {request_cookie}");
         assert_eq!(body_text(response).await, "7");
+    }
+
+    #[test]
+    fn an_id_that_looks_quoted_is_not_mistaken_for_a_quoted_value() {
+        // The writer escapes the quotes, so the wire value carries no literal
+        // `"`. Unquoting has to happen *before* decoding, or the id would come
+        // back as `abc` and never match its own session.
+        let id = SessionId("\"abc\"".to_string());
+        let auth = auth(InMemorySessionStore::default(), None);
+        let set_cookie = auth
+            .set_cookie_value(&id)
+            .to_str()
+            .expect("ascii cookie")
+            .to_string();
+        let request_cookie = set_cookie
+            .split(';')
+            .next()
+            .expect("a name=value pair")
+            .to_string();
+
+        assert!(request_cookie.contains("%22"), "{request_cookie}");
+        assert_eq!(
+            cookie_value(&headers(&request_cookie), "sid").as_deref(),
+            Some("\"abc\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_undecodable_cookie_does_not_authenticate_and_is_cleared() {
+        // Junk escapes decode to replacement characters, which cannot match a
+        // digest: the request is rejected and the junk cookie is cleared rather
+        // than silently ignored.
+        let app = me_app(auth(InMemorySessionStore::default(), None));
+
+        let (status, response) = drive(app, req_get("/me", Some("sid=%FF"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(set_cookies(&response).contains("Max-Age=0"));
     }
 
     #[tokio::test]

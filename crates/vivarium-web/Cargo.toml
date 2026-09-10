@@ -33,6 +33,7 @@ cookie = { version = "0.18.2", features = ["percent-encode"] }
 garde = { version = "0.22.1", features = ["derive", "email"], optional = true }
 jsonwebtoken = { version = "10.3.0", default-features = false, features = ["rust_crypto"] }
 password-hash = { version = "0.5.0", features = ["rand_core", "getrandom", "std"] }
+percent-encoding = "2.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10"
