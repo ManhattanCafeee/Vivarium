@@ -5,13 +5,19 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  # PostgreSQL integration tests read DATABASE_URL; MySQL tests read
+  # MYSQL_DATABASE_URL so the two can run in the same job.
+  DATABASE_URL: postgres://postgres:postgres@localhost:5432/vivarium
+  MYSQL_DATABASE_URL: mysql://root:root@127.0.0.1:3306/vivarium
+
 jobs:
   check:
     name: fmt + clippy + test (${{ matrix.rust }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        rust: [stable, 1.85.0]
+        rust: [stable, 1.94.0]
     services:
       postgres:
         image: postgres:16
@@ -25,8 +31,18 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-    env:
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/vivarium
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: vivarium
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -38,8 +54,30 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
-      - name: Test (incl. PostgreSQL integration)
+      - name: Test (PostgreSQL + MySQL integration)
         run: cargo test --workspace --all-features
+      - name: Feature combinations
+        # `--all-features` cannot prove that a single feature compiles on its
+        # own, so the optional features are checked individually.
+        run: |
+          cargo check -p vivarium-core
+          cargo check -p vivarium-core --no-default-features --features utoipa
+          cargo check -p vivarium-core --no-default-features --features chrono
+          cargo check -p vivarium-core --no-default-features --features uuid
+          cargo check -p vivarium-config
+          cargo check -p vivarium-db
+          cargo check -p vivarium-db --no-default-features --features sqlite
+          cargo check -p vivarium-db --no-default-features --features postgres
+          cargo check -p vivarium-db --no-default-features --features mysql
+          cargo check -p vivarium-web
+          cargo check -p vivarium-web --no-default-features
+          cargo check -p vivarium-web --no-default-features --features validation-validator
+          cargo check -p vivarium-web --no-default-features --features validation-garde
+          cargo check -p vivarium-web --no-default-features --features sqlx
+          cargo check -p vivarium-web --no-default-features --features utoipa
+          cargo check -p vivarium-web --no-default-features --features utoipa-ui
+          cargo check -p vivarium-rs --no-default-features
+          cargo check -p vivarium-rs --no-default-features --features db-mysql
       - name: Doc
         run: cargo doc --no-deps --all-features
       - name: Offline query check

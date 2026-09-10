@@ -12,13 +12,14 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::ApiError;
+use crate::texts::texts;
 use crate::varser::get_authorization;
 
 /// Sign `claims` into a JWT using HS256 and the given shared secret.
 pub fn sign_token<T: Serialize>(claims: &T, secret: &str) -> Result<String, ApiError> {
     let key = EncodingKey::from_secret(secret.as_bytes());
     encode(&Header::new(Algorithm::HS256), claims, &key)
-        .map_err(|err| ApiError::BadRequest(format!("failed to sign token: {err}")))
+        .map_err(|err| ApiError::bad_request(format!("failed to sign token: {err}")))
 }
 
 /// Decode and validate `token` into claims of type `T`.
@@ -26,12 +27,16 @@ pub fn sign_token<T: Serialize>(claims: &T, secret: &str) -> Result<String, ApiE
 /// Validation is pinned to HS256: a token whose header declares any other
 /// algorithm (for example RS256) is rejected, preventing algorithm-confusion
 /// attacks.
+///
+/// A rejected token is a 401 whose message is the catalog's
+/// [`unauthorized`](crate::texts::Texts::unauthorized) text; the reason stays
+/// in the error source, where it is logged.
 pub fn decode_token<T: DeserializeOwned>(token: &str, secret: &str) -> Result<T, ApiError> {
     let key = DecodingKey::from_secret(secret.as_bytes());
     let validation = Validation::new(Algorithm::HS256);
     decode::<T>(token, &key, &validation)
         .map(|data| data.claims)
-        .map_err(|err| ApiError::Unauthorized(format!("invalid token: {err}")))
+        .map_err(|err| ApiError::unauthorized(texts().unauthorized.clone()).with_source(err))
 }
 
 /// The boxed future returned by the JWT authentication middleware.
@@ -61,7 +66,7 @@ where
 {
     Box::pin(async move {
         let token = bearer_token(req.headers())
-            .ok_or_else(|| ApiError::Unauthorized("missing or invalid bearer token".to_string()))?;
+            .ok_or_else(|| ApiError::unauthorized(texts().unauthorized.clone()))?;
         let claims: T = decode_token(token, &secret)?;
         req.extensions_mut().insert(claims);
         Ok(next.run(req).await)
@@ -91,8 +96,8 @@ where
 /// # }
 /// ```
 ///
-/// Failures produce an [`ApiError::Unauthorized`]("missing or invalid bearer
-/// token") response.
+/// Failures produce a 401 whose message is the catalog's
+/// [`unauthorized`](crate::texts::Texts::unauthorized) text.
 pub fn jwt_auth<T>(secret: String) -> JwtAuthLayer
 where
     T: DeserializeOwned + Send + Sync + Clone + 'static,
@@ -149,7 +154,7 @@ mod tests {
         };
         let token = sign_token(&claims, SECRET).expect("sign token");
         let err = decode_token::<Claims>(&token, SECRET).expect_err("must reject expired token");
-        assert!(matches!(err, ApiError::Unauthorized(_)));
+        assert_eq!(err.kind(), crate::error::ErrorKind::Unauthorized);
     }
 
     #[tokio::test]
@@ -171,7 +176,7 @@ mod tests {
         let token = format!("{signing_input}.{signature}");
 
         let err = decode_token::<Claims>(&token, SECRET).expect_err("must reject RS256 token");
-        assert!(matches!(err, ApiError::Unauthorized(_)));
+        assert_eq!(err.kind(), crate::error::ErrorKind::Unauthorized);
     }
 
     #[tokio::test]
@@ -200,7 +205,7 @@ mod tests {
             .to_bytes();
         assert_eq!(&bytes[..], b"alice");
 
-        // Missing token → 401 with the UNAUTHORIZED code.
+        // Missing token → 401 with the numeric code.
         let req = Request::builder().uri("/me").body(Body::empty()).unwrap();
         let response = app.clone().oneshot(req).await.expect("request succeeds");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -211,7 +216,8 @@ mod tests {
             .expect("collect body")
             .to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("error body is json");
-        assert_eq!(body["code"], "UNAUTHORIZED");
+        assert_eq!(body["code"], 401);
+        assert_eq!(body["message"], crate::texts::texts().unauthorized.as_ref());
 
         // Wrong secret / invalid token → 401.
         let bad = sign_token(&fresh_claims("mallory"), "wrong-secret").expect("sign token");

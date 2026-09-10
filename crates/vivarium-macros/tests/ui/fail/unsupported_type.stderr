@@ -1,4 +1,4 @@
-error: #[derive(Entity)] does not support this field type; use one of i8-i64, u8-u64, usize, isize, f32, f64, bool, String, Vec<u8>, serde_json::Value, or Option of those, or mark the field #[entity(json)]
+error: #[derive(Entity)] does not support this field type; use one of i8-i64, u8-u64, usize, isize, f32, f64, bool, String, Vec<u8>, serde_json::Value, chrono::DateTime<Utc>, chrono::NaiveDate, uuid::Uuid, or Option of those, or mark the field #[entity(json)]
  --> tests/ui/fail/unsupported_type.rs:9:13
   |
 9 |     custom: Custom,

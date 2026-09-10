@@ -9,21 +9,27 @@
 //!
 //! | Feature | Provides |
 //! |---|---|
-//! | `db` | [`Query`], the CRUD helpers, and unique-violation detection, no driver |
+//! | `db` | [`Query`], [`Predicate`], [`Update`], [`with_transaction`], the CRUD helpers, and unique-violation detection, no driver |
 //! | `db-sqlite` / `db-postgres` / `db-mysql` | driver-enabled `db` layer |
-//! | `web` | [`ApiError`], [`Varser`], JWT + session auth, refresh tokens, RBAC permissions, password hashing, cache layer |
-//! | `config` | [`Config`] |
+//! | `web` | [`ApiError`] / [`ApiResponse`], the `Varser` family, JWT + session auth, refresh tokens, RBAC permissions, password hashing, cache layer |
+//! | `config` | [`Config`], [`ConfigOptions`], [`ConfigWatcher`] |
+//! | `validation-garde` | the `Garde*` extractors (requires `web`) |
+//! | `utoipa` / `utoipa-ui` | `ToSchema` derives plus the `openapi` helpers (requires `web` for the latter) |
 //!
 //! Default features: `web`, `config`, `db`, `db-sqlite`, `db-postgres`.
+//!
+//! Data-transfer objects are validated with [`validator`](https://docs.rs/validator) 0.20
+//! (`Varser` requires `validator::Validate`); `db` additionally turns on
+//! `vivarium-web/sqlx`, which provides `ApiError::conflict_from_db`.
 //!
 //! # Quick start (SQLite + axum)
 //!
 //! ```no_run
 //! use axum::{Router, routing::post};
 //! use serde::{Deserialize, Serialize};
-//! use garde::Validate;
-//! use vivarium_rs::{ApiError, Order, Query, Sorter, Varser, create};
+//! use validator::Validate;
 //! use vivarium_rs::sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+//! use vivarium_rs::{ApiError, ApiResponse, Initializer, Varser, create};
 //!
 //! #[derive(Clone, sqlx::FromRow, vivarium_rs::Entity)]
 //! struct User {
@@ -31,26 +37,13 @@
 //!     name: String,
 //! }
 //!
-//! #[derive(Debug, Clone, Copy)]
-//! enum UserCol {
-//!     Name,
-//! }
-//!
-//! impl vivarium_rs::Column for UserCol {
-//!     fn name(&self) -> &'static str {
-//!         match self {
-//!             UserCol::Name => "name",
-//!         }
-//!     }
-//! }
-//!
 //! #[derive(Deserialize, Validate)]
 //! struct NewUser {
-//!     #[garde(length(chars, min = 1, max = 100))]
+//!     #[validate(length(min = 1, max = 100, message = "name must be 1-100 characters"))]
 //!     name: String,
 //! }
 //!
-//! impl vivarium_rs::Initializer for NewUser {}
+//! impl Initializer for NewUser {}
 //!
 //! #[derive(Serialize)]
 //! struct UserJson {
@@ -61,11 +54,20 @@
 //! async fn create_user(
 //!     state: axum::extract::State<SqlitePool>,
 //!     Varser(new_user): Varser<NewUser>,
-//! ) -> Result<(), ApiError> {
-//!     create(&state.0, User { id: 0, name: new_user.name })
-//!         .await
-//!         .map_err(|e| ApiError::Internal { system: e.to_string() })?;
-//!     Ok(())
+//! ) -> Result<ApiResponse<UserJson>, ApiError> {
+//!     let id = create(
+//!         &state.0,
+//!         User {
+//!             id: 0,
+//!             name: new_user.name.clone(),
+//!         },
+//!     )
+//!     .await
+//!     .map_err(ApiError::database)?;
+//!     Ok(ApiResponse::ok(UserJson {
+//!         id,
+//!         name: new_user.name,
+//!     }))
 //! }
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -81,23 +83,34 @@
 //! ```
 #![deny(missing_docs)]
 
-pub use vivarium_core::{Column, Entity, Order, Page, Pagination, Sorter, Value};
+pub use vivarium_core::{
+    Column, EncodeError, Entity, NullType, Order, Page, Pagination, PrimaryKey, PrimaryKeyError,
+    Sorter, Value,
+};
 
 #[cfg(feature = "db")]
 pub use vivarium_db::{
-    Error as DbError, MIGRATOR, Query, count, create, delete, exists, find_by_id,
-    is_unique_violation, sqlx, update_by_id,
+    Error as DbError, Expr, Predicate, Query, RawFragment, RawFragmentError, Update, count, create,
+    delete, exists, find_by_id, is_unique_violation, sqlx, update_by_id, with_transaction,
 };
 
 pub use vivarium_macros::Entity;
 
 #[cfg(feature = "web")]
 pub use vivarium_web::{
-    ApiError, FormVarser, Initializer, OptionalSessionCtx, PathVarser, PermissionSet, QueryVarser,
-    RefreshTokenManager, RefreshTokenRecord, RefreshTokenStore, SessionAuth, SessionCtx,
-    SessionRecord, SessionStore, TokenPair, Varser, authz, cache, get_authorization, hash, jwt,
-    password, perms_match, serve, session, session_layer, token, verify, verify_login,
+    ApiError, ApiResponse, ErrorKind, FieldViolation, FormVarser, Initializer, OptionalSessionCtx,
+    PathVarser, PermissionSet, QueryVarser, RefreshTokenManager, RefreshTokenRecord,
+    RefreshTokenStore, Result, SessionAuth, SessionCtx, SessionRecord, SessionStore, Texts,
+    TokenPair, ValidationErrors, Varser, authz, cache, debug_mode, error, get_authorization, hash,
+    install_debug_mode, install_texts, jwt, password, perms_match, response, serve, session,
+    session_layer, texts, token, validation, varser, verify, verify_login,
 };
 
+#[cfg(all(feature = "web", feature = "validation-garde"))]
+pub use vivarium_web::{GardeFormVarser, GardePathVarser, GardeQueryVarser, GardeVarser};
+
+#[cfg(all(feature = "web", feature = "utoipa"))]
+pub use vivarium_web::openapi;
+
 #[cfg(feature = "config")]
-pub use vivarium_config::{Config, ConfigError};
+pub use vivarium_config::{Config, ConfigError, ConfigOptions, ConfigWatcher, HandlerId};

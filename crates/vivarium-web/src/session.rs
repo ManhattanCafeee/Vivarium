@@ -78,6 +78,7 @@ use cookie::{Cookie, SameSite};
 use uuid::Uuid;
 
 use crate::error::ApiError;
+use crate::texts::texts;
 
 /// A live session as stored server-side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,8 +96,8 @@ pub struct SessionRecord {
 /// Implement against your own schema: the recommended table is
 /// `sessions(session_id UNIQUE, user_id, expires_at, last_activity)`
 /// (adapt the time columns to your driver — epoch seconds is the portable
-/// choice). Map storage failures to [`ApiError::Internal`] with a `system`
-/// description; the middleware never exposes them to clients.
+/// choice). Map storage failures to [`ApiError::internal`] or
+/// [`ApiError::database`]; the middleware never exposes them to clients.
 pub trait SessionStore: Send + Sync + 'static {
     /// Persists a new session.
     fn create<'a>(
@@ -252,7 +253,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionCtx {
             .extensions
             .get::<SessionCtx>()
             .cloned()
-            .ok_or_else(|| ApiError::Unauthorized("authentication required".to_string()))
+            .ok_or_else(|| ApiError::unauthorized(texts().unauthorized.clone()))
     }
 }
 
@@ -529,7 +530,10 @@ mod tests {
         let (status, response) = drive(app, req_get("/me", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         let body = body_text(response).await;
-        assert!(body.contains("\"UNAUTHORIZED\""), "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("error body is json");
+        assert_eq!(json["code"], 401);
+        assert_eq!(json["message"], texts().unauthorized.as_ref());
+        assert_eq!(json["data"], serde_json::Value::Null);
     }
 
     #[tokio::test]
@@ -686,9 +690,7 @@ mod tests {
         }
 
         async fn find(&self, _session_id: &str) -> Result<Option<SessionRecord>, ApiError> {
-            Err(ApiError::Internal {
-                system: "lookup failed".into(),
-            })
+            Err(ApiError::internal("lookup failed"))
         }
 
         async fn touch(

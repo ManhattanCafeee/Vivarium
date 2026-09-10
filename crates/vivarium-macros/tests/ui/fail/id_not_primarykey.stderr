@@ -1,0 +1,5 @@
+error: #[derive(Entity)] requires the id field to be a primary-key type: i64, u64, i32, u32, or String
+ --> tests/ui/fail/id_not_primarykey.rs:7:9
+  |
+7 |     id: f64,
+  |         ^^^

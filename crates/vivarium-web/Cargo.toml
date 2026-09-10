@@ -7,22 +7,41 @@ license.workspace = true
 repository.workspace = true
 readme = "README.md"
 authors.workspace = true
-description = "axum ergonomics for vivarium: ApiError, validated extractors, JWT + session auth, refresh tokens, RBAC, password hashing, cache layer."
+description = "axum ergonomics for vivarium: ApiResponse/ApiError envelope, validated extractors, JWT + session auth, refresh tokens, RBAC, password hashing, cache layer, OpenAPI helpers."
+
+[features]
+default = ["validation-validator"]
+# Binds `Varser`/`QueryVarser`/`PathVarser`/`FormVarser` to `validator::Validate`.
+validation-validator = ["dep:validator"]
+# Adds the `Garde*` extractors, bound to `garde::Validate`.
+validation-garde = ["dep:garde"]
+# `ToSchema` derives, security schemes and spec metadata helpers.
+utoipa = ["dep:utoipa"]
+# `openapi::mount`: serves the spec plus Scalar and Swagger UI.
+utoipa-ui = ["utoipa", "dep:utoipa-axum", "dep:utoipa-scalar", "dep:utoipa-swagger-ui"]
+# `From<sqlx::Error> for ApiError` and `ApiError::conflict_from_db`.
+sqlx = ["dep:sqlx"]
 
 [dependencies]
 argon2 = "0.5.3"
 axum = { version = "0.8.9", features = ["json", "form", "query", "tokio"] }
 cookie = { version = "0.18.2", features = ["percent-encode"] }
-garde = { version = "0.22.1", features = ["derive", "email"] }
+garde = { version = "0.22.1", features = ["derive", "email"], optional = true }
 jsonwebtoken = { version = "10.3.0", default-features = false, features = ["rust_crypto"] }
 password-hash = { version = "0.5.0", features = ["rand_core", "getrandom"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sqlx = { version = "0.9", optional = true, default-features = false }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["net"] }
 tower = "0.5.3"
 tracing = "0.1.44"
+utoipa = { version = "5.5", optional = true, features = ["axum_extras"] }
+utoipa-axum = { version = "0.2", optional = true }
+utoipa-scalar = { version = "0.3", optional = true, features = ["axum"] }
+utoipa-swagger-ui = { version = "9", optional = true, features = ["axum", "vendored"] }
 uuid = { version = "1.26.0", features = ["v4"] }
+validator = { version = "0.20", optional = true, features = ["derive"] }
 
 [dev-dependencies]
 base64 = "0.23.1"

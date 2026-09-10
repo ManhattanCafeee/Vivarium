@@ -8,11 +8,13 @@ use std::time::Duration;
 /// slow statements (> 1 s) at `WARN`.
 ///
 /// ```
+/// # #[cfg(feature = "sqlite")] {
 /// # use vivarium_db::pool::with_query_logging;
 /// use sqlx::sqlite::SqliteConnectOptions;
 ///
 /// let options = with_query_logging(SqliteConnectOptions::new());
 /// # let _ = options;
+/// # }
 /// ```
 pub fn with_query_logging<Opt: ConnectOptions>(options: Opt) -> Opt {
     options

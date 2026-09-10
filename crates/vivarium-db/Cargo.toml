@@ -15,16 +15,19 @@ default = []
 sqlite = ["sqlx/sqlite"]
 # PostgreSQL driver (sqlx/postgres).
 postgres = ["sqlx/postgres"]
-# MySQL driver (sqlx/mysql).
-mysql = ["sqlx/mysql"]
+# MySQL driver (sqlx/mysql); `mysql-rsa` enables RSA key exchange for
+# non-TLS connections (required by a default local MySQL 8 server).
+mysql = ["sqlx/mysql", "sqlx/mysql-rsa"]
 
 [dependencies]
+chrono = "0.4.45"
 log = "0.4.34"
-sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "json", "runtime-tokio"] }
+serde_json = "1.0.151"
+sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "json", "chrono", "uuid", "runtime-tokio"] }
+uuid = "1.26.0"
 tracing = "0.1.44"
-vivarium-core = { version = "0.1.2", path = "../vivarium-core" }
+vivarium-core = { version = "0.1.2", path = "../vivarium-core", features = ["chrono", "uuid"] }
 vivarium-macros = { version = "0.1.0", path = "../vivarium-macros" }
 
 [dev-dependencies]
-serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["full"] }

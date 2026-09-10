@@ -1,4 +1,8 @@
-//! Migration up/down tests against SQLite in-memory databases.
+//! Example-migration up/down tests against SQLite in-memory databases.
+//!
+//! `vivarium-db` ships no embedded migrator; these tests exercise the sample
+//! migrations in `examples/migrations/` exactly the way an application would,
+//! through its own [`sqlx::migrate!`].
 #![cfg(feature = "sqlite")]
 
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
@@ -19,11 +23,14 @@ async fn users_table_count(pool: &SqlitePool) -> i64 {
 }
 
 #[tokio::test]
-async fn migrations_apply_and_undo() {
+async fn example_migrations_apply_and_undo() {
     let pool = pool().await;
 
     assert_eq!(users_table_count(&pool).await, 0);
-    vivarium_db::MIGRATOR.run(&pool).await.expect("migrate up");
+    sqlx::migrate!("./examples/migrations")
+        .run(&pool)
+        .await
+        .expect("migrate up");
     assert_eq!(users_table_count(&pool).await, 1);
 
     // the migrated table is usable
@@ -31,8 +38,13 @@ async fn migrations_apply_and_undo() {
         .execute(&pool)
         .await
         .expect("insert");
+    let name: String = sqlx::query_scalar("SELECT name FROM users")
+        .fetch_one(&pool)
+        .await
+        .expect("select");
+    assert_eq!(name, "migrated");
 
-    vivarium_db::MIGRATOR
+    sqlx::migrate!("./examples/migrations")
         .undo(&pool, 0)
         .await
         .expect("migrate down");

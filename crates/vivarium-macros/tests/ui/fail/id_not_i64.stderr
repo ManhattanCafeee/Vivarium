@@ -1,5 +1,0 @@
-error: #[derive(Entity)] requires the id field to be `i64`
- --> tests/ui/fail/id_not_i64.rs:6:9
-  |
-6 |     id: i32,
-  |         ^^^

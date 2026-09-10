@@ -1,0 +1,283 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "vivarium-web golden",
+    "description": "The golden OpenAPI document.",
+    "version": "0.3.0"
+  },
+  "paths": {
+    "/users": {
+      "get": {
+        "tags": [
+          "user"
+        ],
+        "summary": "The success case: a list wrapped in the response envelope.",
+        "operationId": "User__list",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_User"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "authentication required"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "user"
+        ],
+        "summary": "The validation-failure case: a body extractor that can reject with 422.",
+        "operationId": "User__create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_User"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "malformed or unparseable request"
+          },
+          "422": {
+            "description": "validation failed"
+          }
+        }
+      }
+    },
+    "/users/me": {
+      "get": {
+        "tags": [
+          "user"
+        ],
+        "summary": "The authentication-failure case: a session-protected endpoint.",
+        "operationId": "User__me",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_User"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiResponse_User": {
+        "type": "object",
+        "description": "The unified response envelope.\n\n```\nuse vivarium_web::response::ApiResponse;\n\nlet body = ApiResponse::ok(serde_json::json!({ \"id\": 1 }));\nassert_eq!(body.code, 0);\nassert_eq!(body.message, \"ok\");\n```",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`0` on success, otherwise the HTTP status code of the failure."
+          },
+          "data": {
+            "type": "object",
+            "required": [
+              "id",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          "errors": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ValidationErrors",
+                "description": "The validation violations; present only for a failed validation."
+              }
+            ]
+          },
+          "message": {
+            "type": "string",
+            "description": "A short human-readable message; `\"ok\"` on success."
+          }
+        }
+      },
+      "ApiResponse_Vec_User": {
+        "type": "object",
+        "description": "The unified response envelope.\n\n```\nuse vivarium_web::response::ApiResponse;\n\nlet body = ApiResponse::ok(serde_json::json!({ \"id\": 1 }));\nassert_eq!(body.code, 0);\nassert_eq!(body.message, \"ok\");\n```",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`0` on success, otherwise the HTTP status code of the failure."
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "name"
+              ],
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "name": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "errors": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ValidationErrors",
+                "description": "The validation violations; present only for a failed validation."
+              }
+            ]
+          },
+          "message": {
+            "type": "string",
+            "description": "A short human-readable message; `\"ok\"` on success."
+          }
+        }
+      },
+      "CreateUserReq": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "FieldViolation": {
+        "type": "object",
+        "description": "One failed rule for one field.",
+        "required": [
+          "code",
+          "params"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The rule that failed (`\"length\"`, `\"email\"`, …)."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The message the DTO declared for this rule, when it declared one."
+          },
+          "params": {
+            "type": "object",
+            "description": "The parameters of the failed rule (e.g. `{\"min\": 3, \"max\": 20}`).\n\nThe submitted field value is deliberately **not** echoed: `validator`\nrecords it as `params.value`, which would reflect raw input (a\npassword, a token) back to the client.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ValidationErrors": {
+        "type": "object",
+        "description": "Every violation, grouped by field.\n\nKeys are flattened field paths: `email` for a top-level field,\n`profile.email` for a nested struct field, `items[0].name` for a field of a\nlist element. The map is ordered, so the serialized body is stable.",
+        "additionalProperties": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/FieldViolation"
+          }
+        },
+        "propertyNames": {
+          "type": "string"
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      },
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "sid"
+      }
+    }
+  }
+}

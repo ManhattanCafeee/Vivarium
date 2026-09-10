@@ -3,8 +3,8 @@
 //! Procedural macros for the [`vivarium-rs`] family.
 //!
 //! Currently provides [`#[derive(Entity)]`][derive@Entity], which derives
-//! `vivarium_core::Entity` for single-`i64`-primary-key structs. The derive
-//! is re-exported by `vivarium-db` and the `vivarium` facade, so it is usually
+//! `vivarium_core::Entity` for single-primary-key structs. The derive is
+//! re-exported by `vivarium-db` and the `vivarium` facade, so it is usually
 //! used as `vivarium_db::Entity` / `vivarium_rs::Entity` without depending on
 //! this crate directly.
 //!
@@ -19,13 +19,27 @@
 //!   facade, or to `"vivarium_core"` when depending on the lower-level
 //!   crates directly.
 //! - `#[entity(id)]` (field): mark the primary-key field. Defaults to the
-//!   field named `id`. Must be `i64`.
+//!   field named `id`. The type must implement `PrimaryKey` (`i64`, `u64`,
+//!   `i32`, `u32`, or `String`).
 //! - `#[entity(rename = "col")]` (field): override the column name. Defaults
 //!   to the field name.
 //! - `#[entity(json)]` (field): serialize the field via `serde_json` into a
 //!   JSON column instead of requiring a natively supported type.
+//!
+//! `chrono::DateTime<Utc>`, `chrono::NaiveDate` and `uuid::Uuid` are
+//! recognised **by the last path segment of the field type** (`DateTime`,
+//! `NaiveDate`, `Uuid`), so a type of that name from another crate is mapped
+//! onto the corresponding `Value` variant as well. Mark a colliding type
+//! `#[entity(json)]` to store it as JSON instead.
 //! - `#[entity(skip)]` (field): exclude the field from
 //!   `columns_and_values` (it still decodes in `FromRow`).
+//!
+//! Unknown attribute keys are compile errors rather than being ignored, and a
+//! field whose type is not supported is rejected with the list of supported
+//! types. `Option<T>` fields bind as typed `NULL`s
+//! (`Value::TypedNull(NullType::…)`) so that drivers which check parameter
+//! types accept them; `#[entity(json)]` fields need `T: Serialize` and report
+//! a serialization failure as `EncodeError` instead of panicking.
 //!
 //! # Example
 //!
@@ -47,7 +61,14 @@
 //! assert_eq!(User::TABLE, "users");
 //! assert_eq!(User::ID_COLUMN, "id");
 //! assert_eq!(user.id(), 7);
-//! assert_eq!(user.columns_and_values().len(), 3);
+//!
+//! let columns = user.columns_and_values().expect("encodes");
+//! assert_eq!(columns.len(), 3);
+//! // `None` becomes a typed NULL, not an untyped one.
+//! assert_eq!(
+//!     columns[1].1,
+//!     vivarium_core::Value::TypedNull(vivarium_core::NullType::I64)
+//! );
 //! ```
 //!
 //! [`vivarium-rs`]: https://docs.rs/vivarium-rs
@@ -55,10 +76,8 @@
 #![forbid(unsafe_code)]
 
 use proc_macro::TokenStream;
-use quote::quote;
-use syn::{
-    Attribute, Data, DeriveInput, Error, Fields, LitStr, Meta, Result, Type, parse_macro_input,
-};
+use quote::{format_ident, quote};
+use syn::{Attribute, Data, DeriveInput, Error, Fields, LitStr, Result, Type, parse_macro_input};
 
 /// Derives `vivarium_core::Entity` for a named-field struct.
 ///
@@ -125,10 +144,16 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
         )
     })?;
 
+    // Parse every field's attributes first, so a typo is reported at its own
+    // span instead of surfacing as a confusing "needs an id field" error.
+    for field in fields {
+        field_attrs(field)?;
+    }
+
     let (id_field, id_col_lit): (&syn::Field, LitStr) = {
         let marked: Vec<&syn::Field> = fields
             .iter()
-            .filter(|f| field_attr(f, "id").is_some())
+            .filter(|f| field_attrs(f).is_ok_and(|attrs| attrs.id))
             .collect();
         let named: Vec<&syn::Field> = fields
             .iter()
@@ -137,6 +162,9 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
         let field = match (marked.as_slice(), named.as_slice()) {
             ([marked], []) => *marked,
             ([], [named]) => *named,
+            // `#[entity(id)] id: …`: the marker sits on the field that is also
+            // named `id` — one candidate field, not two.
+            ([marked], [named]) if std::ptr::eq(*marked, *named) => *marked,
             ([], []) => {
                 return Err(Error::new_spanned(
                     name,
@@ -161,14 +189,17 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
         };
         {
             let ident = field.ident.as_ref().expect("named field");
-            if !type_is(&field.ty, &["i64"]) {
+            if !is_primary_key_type(&field.ty) {
                 return Err(Error::new_spanned(
                     &field.ty,
-                    "#[derive(Entity)] requires the id field to be `i64`",
+                    "#[derive(Entity)] requires the id field to be a primary-key type: \
+                     i64, u64, i32, u32, or String",
                 ));
             }
-            let rename = field_attr_lit(field, "rename")?;
-            let col_lit = rename.unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
+            let attrs = field_attrs(field)?;
+            let col_lit = attrs
+                .rename
+                .unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
             (field, col_lit)
         }
     };
@@ -177,41 +208,70 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
     let mut column_pushes = Vec::new();
     for field in fields {
         let ident = field.ident.as_ref().expect("named field");
-        if std::ptr::eq(field, id_field) || field_attr(field, "skip").is_some() {
+        let attrs = field_attrs(field)?;
+        if std::ptr::eq(field, id_field) || attrs.skip {
             continue;
         }
-        let rename = field_attr_lit(field, "rename")?;
-        let col_lit = rename.unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
-        let value = value_expr(
-            field,
-            &quote!(self.#ident),
-            field_attr(field, "json").is_some(),
-            &anchor,
-        )?;
+        let col_lit = attrs
+            .rename
+            .unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
+        let value = value_expr(field, &quote!(self.#ident), attrs.json, &anchor)?;
         column_pushes.push(quote! {
             out.push((#col_lit, #value));
         });
     }
 
+    let id_ty = &id_field.ty;
+    // `PrimaryKey` is `Clone`, not `Copy`, so `String` keys are cloned while
+    // the integer keys are copied.
+    let id_expr = if type_is(id_ty, &["String"]) {
+        quote!(self.#id_ident.clone())
+    } else {
+        quote!(self.#id_ident)
+    };
+
     Ok(quote! {
         impl #anchor::Entity for #name {
+            type Id = #id_ty;
+
             const TABLE: &'static str = #table;
             const ID_COLUMN: &'static str = #id_col_lit;
 
-            fn id(&self) -> i64 {
-                self.#id_ident
+            fn id(&self) -> Self::Id {
+                #id_expr
             }
 
-            fn columns_and_values(&self) -> Vec<(&'static str, #anchor::Value)> {
+            fn columns_and_values(
+                &self,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<(&'static str, #anchor::Value)>,
+                #anchor::EncodeError,
+            > {
                 let mut out = ::std::vec::Vec::new();
                 #(#column_pushes)*
-                out
+                ::core::result::Result::Ok(out)
             }
         }
     })
 }
 
+/// Error for a field type the derive cannot map onto a [`Value`] variant.
+const UNSUPPORTED_FIELD: &str = "#[derive(Entity)] does not support this field type; use one of \
+     i8-i64, u8-u64, usize, isize, f32, f64, bool, String, Vec<u8>, serde_json::Value, \
+     chrono::DateTime<Utc>, chrono::NaiveDate, uuid::Uuid, or Option of those, or mark the field \
+     #[entity(json)]";
+
+/// Error for an `Option` inner type the derive cannot map onto a [`Value`]
+/// variant.
+const UNSUPPORTED_OPTION: &str = "#[derive(Entity)] does not support this field type inside \
+     Option; use one of i8-i64, u8-u64, usize, isize, f32, f64, bool, String, Vec<u8>, \
+     serde_json::Value, chrono::DateTime<Utc>, chrono::NaiveDate, uuid::Uuid";
+
 /// Generates the `Value` conversion expression for a field.
+///
+/// `access` is a place expression for the field (`self.name`). `Option<T>`
+/// fields bind as typed NULLs so drivers that check parameter types accept
+/// them.
 fn value_expr(
     field: &syn::Field,
     access: &proc_macro2::TokenStream,
@@ -219,116 +279,208 @@ fn value_expr(
     anchor: &syn::Path,
 ) -> Result<proc_macro2::TokenStream> {
     if json {
+        // Handled inside a function returning `Result<_, EncodeError>`, so the
+        // `?` converts a serialization failure instead of panicking.
         return Ok(quote! {
-            #anchor::Value::Json(
-                ::serde_json::to_value(#access)
-                    .expect("field marked #[entity(json)] must serialize to JSON")
-            )
+            #anchor::Value::Json(::serde_json::to_value(&#access)?)
         });
     }
     let ty = &field.ty;
-    if type_is(ty, &["i64"]) {
-        Ok(quote!(#anchor::Value::I64(#access)))
-    } else if type_is(ty, &["i8"])
-        || type_is(ty, &["i16"])
-        || type_is(ty, &["i32"])
-        || type_is(ty, &["u8"])
-        || type_is(ty, &["u16"])
-        || type_is(ty, &["u32"])
-        || type_is(ty, &["u64"])
-        || type_is(ty, &["usize"])
-        || type_is(ty, &["isize"])
+    if let Some(expr) = scalar_value_expr(ty, access, false, anchor) {
+        return Ok(expr);
+    }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
     {
-        Ok(quote!(#anchor::Value::I64(#access as i64)))
-    } else if type_is(ty, &["f64"]) {
-        Ok(quote!(#anchor::Value::F64(#access)))
-    } else if type_is(ty, &["f32"]) {
-        Ok(quote!(#anchor::Value::F64(#access as f64)))
-    } else if type_is(ty, &["bool"]) {
-        Ok(quote!(#anchor::Value::Bool(#access)))
-    } else if type_is(ty, &["String"]) {
-        Ok(quote!(#anchor::Value::Text(#access.clone())))
-    } else if type_is(ty, &["Vec", "u8"]) {
-        Ok(quote!(#anchor::Value::Bytes(#access.clone())))
-    } else if type_is(ty, &["serde_json", "Value"]) || single_ident(ty, "Value") {
-        Ok(quote!(#anchor::Value::Json(
-            ::serde_json::to_value(&#access)
-                .expect("JSON value fields must serialize to JSON")
-        )))
-    } else if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            if segment.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                        let inner_expr = value_expr_inner(inner, &quote!(v), anchor)?;
-                        return Ok(quote! {
-                            match &#access {
-                                ::core::option::Option::Some(v) => #inner_expr,
-                                ::core::option::Option::None => #anchor::Value::Null,
-                            }
-                        });
-                    }
+        let inner_expr = value_expr_inner(inner, &quote!(v), anchor)?;
+        let null_variant =
+            null_variant(inner).ok_or_else(|| Error::new_spanned(inner, UNSUPPORTED_OPTION))?;
+        let null_ident = format_ident!("{null_variant}");
+        return Ok(quote! {
+            match &#access {
+                ::core::option::Option::Some(v) => #inner_expr,
+                ::core::option::Option::None => {
+                    #anchor::Value::TypedNull(#anchor::NullType::#null_ident)
                 }
             }
-        }
-        Err(Error::new_spanned(
-            ty,
-            "#[derive(Entity)] does not support this field type; use one of i8-i64, u8-u64, \
-             usize, isize, f32, f64, bool, String, Vec<u8>, serde_json::Value, or Option of \
-             those, or mark the field #[entity(json)]",
-        ))
-    } else {
-        Err(Error::new_spanned(
-            ty,
-            "#[derive(Entity)] does not support this field type; use a path type, or mark the \
-             field #[entity(json)]",
-        ))
+        });
     }
+    Err(Error::new_spanned(ty, UNSUPPORTED_FIELD))
 }
 
-/// Like [`value_expr`] but without the field-level `json` attribute (used for
-/// `Option` inner types). The `access` token is a `&T` reference here, so all
-/// expressions deref it.
+/// Like [`value_expr`] for the inner type of an `Option` field, whose access
+/// token evaluates to a `&T`.
 fn value_expr_inner(
     ty: &Type,
     access: &proc_macro2::TokenStream,
     anchor: &syn::Path,
 ) -> Result<proc_macro2::TokenStream> {
+    scalar_value_expr(ty, access, true, anchor)
+        .ok_or_else(|| Error::new_spanned(ty, UNSUPPORTED_OPTION))
+}
+
+/// The `Value` constructor for a supported scalar field type, if any.
+///
+/// With `by_ref` the access token evaluates to a `&T` and is dereferenced.
+fn scalar_value_expr(
+    ty: &Type,
+    access: &proc_macro2::TokenStream,
+    by_ref: bool,
+    anchor: &syn::Path,
+) -> Option<proc_macro2::TokenStream> {
+    let deref = |token: &proc_macro2::TokenStream| {
+        if by_ref {
+            quote!(*#token)
+        } else {
+            token.clone()
+        }
+    };
+    let value = deref(access);
+
     if type_is(ty, &["i64"]) {
-        Ok(quote!(#anchor::Value::I64(*#access)))
-    } else if type_is(ty, &["i8"])
-        || type_is(ty, &["i16"])
-        || type_is(ty, &["i32"])
-        || type_is(ty, &["u8"])
-        || type_is(ty, &["u16"])
-        || type_is(ty, &["u32"])
-        || type_is(ty, &["u64"])
-        || type_is(ty, &["usize"])
-        || type_is(ty, &["isize"])
-    {
-        Ok(quote!(#anchor::Value::I64(*#access as i64)))
+        Some(quote!(#anchor::Value::I64(#value)))
+    } else if is_integer_type(ty) {
+        Some(quote!(#anchor::Value::I64(#value as i64)))
     } else if type_is(ty, &["f64"]) {
-        Ok(quote!(#anchor::Value::F64(*#access)))
+        Some(quote!(#anchor::Value::F64(#value)))
     } else if type_is(ty, &["f32"]) {
-        Ok(quote!(#anchor::Value::F64(*#access as f64)))
+        Some(quote!(#anchor::Value::F64(#value as f64)))
     } else if type_is(ty, &["bool"]) {
-        Ok(quote!(#anchor::Value::Bool(*#access)))
+        Some(quote!(#anchor::Value::Bool(#value)))
     } else if type_is(ty, &["String"]) {
-        Ok(quote!(#anchor::Value::Text((#access).clone())))
-    } else if type_is(ty, &["Vec", "u8"]) {
-        Ok(quote!(#anchor::Value::Bytes((#access).clone())))
+        let value = if by_ref {
+            deref(access)
+        } else {
+            quote!(#access)
+        };
+        Some(quote!(#anchor::Value::Text((#value).clone())))
+    } else if is_vec_u8(ty) {
+        let value = if by_ref {
+            deref(access)
+        } else {
+            quote!(#access)
+        };
+        Some(quote!(#anchor::Value::Bytes((#value).clone())))
     } else if type_is(ty, &["serde_json", "Value"]) || single_ident(ty, "Value") {
-        Ok(quote!(#anchor::Value::Json(
-            ::serde_json::to_value(#access).expect("JSON value fields must serialize to JSON")
+        Some(quote!(#anchor::Value::Json(
+            ::serde_json::to_value(&#value)?
         )))
+    } else if is_datetime_utc(ty) {
+        Some(quote!(#anchor::Value::DateTime(#value)))
+    } else if last_segment_is(ty, "NaiveDate") {
+        Some(quote!(#anchor::Value::NaiveDate(#value)))
+    } else if last_segment_is(ty, "Uuid") {
+        Some(quote!(#anchor::Value::Uuid(#value)))
     } else {
-        Err(Error::new_spanned(
-            ty,
-            "#[derive(Entity)] does not support this field type inside Option; use one of \
-             i8-i64, u8-u64, usize, isize, f32, f64, bool, String, Vec<u8>, \
-             serde_json::Value",
-        ))
+        None
     }
+}
+
+/// The [`NullType`][anchor] variant an `Option<T>` of this type binds as.
+fn null_variant(ty: &Type) -> Option<&'static str> {
+    if type_is(ty, &["i64"]) || is_integer_type(ty) {
+        Some("I64")
+    } else if type_is(ty, &["f64"]) || type_is(ty, &["f32"]) {
+        Some("F64")
+    } else if type_is(ty, &["bool"]) {
+        Some("Bool")
+    } else if type_is(ty, &["String"]) {
+        Some("Text")
+    } else if is_vec_u8(ty) {
+        Some("Bytes")
+    } else if type_is(ty, &["serde_json", "Value"]) || single_ident(ty, "Value") {
+        Some("Json")
+    } else if is_datetime_utc(ty) {
+        Some("DateTime")
+    } else if last_segment_is(ty, "NaiveDate") {
+        Some("NaiveDate")
+    } else if last_segment_is(ty, "Uuid") {
+        Some("Uuid")
+    } else {
+        None
+    }
+}
+
+/// True for the primary-key types of `vivarium_core::PrimaryKey`.
+fn is_primary_key_type(ty: &Type) -> bool {
+    type_is(ty, &["i64"])
+        || type_is(ty, &["u64"])
+        || type_is(ty, &["i32"])
+        || type_is(ty, &["u32"])
+        || type_is(ty, &["String"])
+}
+
+/// True for the integer types mapped onto `Value::I64` (`i64` excluded; it is
+/// handled separately so it can be passed through without a cast).
+fn is_integer_type(ty: &Type) -> bool {
+    [
+        "i8", "i16", "i32", "u8", "u16", "u32", "u64", "usize", "isize",
+    ]
+    .iter()
+    .any(|name| type_is(ty, &[*name]))
+}
+
+/// True for `Vec<u8>` (however it is qualified), which maps onto
+/// `Value::Bytes`.
+///
+/// `Vec<u8>` is one path segment carrying an argument, so the generic
+/// [`type_is`] helper can never match it.
+fn is_vec_u8(ty: &Type) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return false;
+    };
+    if segment.ident != "Vec" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return false;
+    };
+    args.args.len() == 1
+        && matches!(
+            args.args.first(),
+            Some(syn::GenericArgument::Type(inner)) if type_is(inner, &["u8"])
+        )
+}
+
+/// True for `chrono::DateTime<chrono::Utc>`, however it is qualified.
+fn is_datetime_utc(ty: &Type) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return false;
+    };
+    if segment.ident != "DateTime" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return false;
+    };
+    args.args.iter().any(|arg| match arg {
+        syn::GenericArgument::Type(Type::Path(inner)) => {
+            inner.path.segments.last().is_some_and(|s| s.ident == "Utc")
+        }
+        _ => false,
+    })
+}
+
+/// True when the last path segment is the bare identifier `name`
+/// (`NaiveDate`, `chrono::NaiveDate`, …).
+fn last_segment_is(ty: &Type, name: &str) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == name && segment.arguments.is_none())
 }
 
 /// Struct-level `#[entity(...)]` attributes.
@@ -363,55 +515,53 @@ impl EntityAttrs {
     }
 }
 
-/// Returns the string-literal value of `#[entity(name = "...")]` on a field.
-fn field_attr_lit(field: &syn::Field, name: &str) -> Result<Option<LitStr>> {
-    let mut found = None;
-    for attr in &field.attrs {
-        if !attr.path().is_ident("entity") {
-            continue;
-        }
-        attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident(name) {
-                let lit: LitStr = meta.value()?.parse()?;
-                found = Some(lit);
-                Ok(())
-            } else {
-                Ok(())
-            }
-        })?;
-    }
-    Ok(found)
+/// Field-level `#[entity(...)]` attributes.
+#[derive(Default)]
+struct FieldAttrs {
+    id: bool,
+    json: bool,
+    skip: bool,
+    rename: Option<LitStr>,
 }
 
-/// Returns `Some(())` when the field has a bare `#[entity(name)]` marker
-/// (either `#[entity(name)]` or `#[entity(name, ...)]`).
-fn field_attr(field: &syn::Field, name: &str) -> Option<()> {
-    for attr in &field.attrs {
-        if !attr.path().is_ident("entity") {
-            continue;
-        }
-        match &attr.meta {
-            Meta::List(list) => {
-                let mut found = false;
-                let _ = list.parse_nested_meta(|meta| {
-                    if meta.path.is_ident(name) {
-                        found = true;
-                    }
+impl FieldAttrs {
+    /// Parses a field's attributes, rejecting unknown keys instead of
+    /// ignoring them.
+    fn parse(attrs: &[Attribute]) -> Result<Self> {
+        let mut parsed = Self::default();
+        for attr in attrs {
+            if !attr.path().is_ident("entity") {
+                continue;
+            }
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("id") {
+                    parsed.id = true;
                     Ok(())
-                });
-                if found {
-                    return Some(());
+                } else if meta.path.is_ident("json") {
+                    parsed.json = true;
+                    Ok(())
+                } else if meta.path.is_ident("skip") {
+                    parsed.skip = true;
+                    Ok(())
+                } else if meta.path.is_ident("rename") {
+                    let lit: LitStr = meta.value()?.parse()?;
+                    parsed.rename = Some(lit);
+                    Ok(())
+                } else {
+                    Err(meta.error(
+                        "unknown #[entity] field attribute; expected `id`, `json`, `skip`, or \
+                         `rename = \"...\"`",
+                    ))
                 }
-            }
-            Meta::Path(path) => {
-                if path.is_ident(name) {
-                    return Some(());
-                }
-            }
-            Meta::NameValue(_) => {}
+            })?;
         }
+        Ok(parsed)
     }
-    None
+}
+
+/// Parses a field's `#[entity(...)]` attributes.
+fn field_attrs(field: &syn::Field) -> Result<FieldAttrs> {
+    FieldAttrs::parse(&field.attrs)
 }
 
 /// True when the type path is exactly the given segments (e.g. `i64` or

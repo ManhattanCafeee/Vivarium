@@ -10,7 +10,7 @@
 //! The table is app-owned; the recommended shape is
 //! `refresh_tokens(token UNIQUE, user_id, expires_at)` (adapt time columns to
 //! your driver — epoch seconds is portable). Map storage failures to
-//! [`ApiError::Internal`].
+//! [`ApiError::internal`].
 //!
 //! ```no_run
 //! use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -177,7 +177,7 @@ impl<S: RefreshTokenStore> RefreshTokenManager<S> {
     /// Call with a freshly rebuilt `claims` set (e.g. after re-loading the
     /// user) — the new access token carries it verbatim. A missing, expired,
     /// replayed, or concurrently raced token yields
-    /// [`ApiError::Unauthorized`] with "invalid or expired refresh token".
+    /// [`ApiError::unauthorized`] with "invalid or expired refresh token".
     pub async fn rotate<C: Serialize>(
         &self,
         received: &str,
@@ -224,8 +224,14 @@ pub struct TokenPair {
     pub refresh_token: String,
 }
 
+/// The 401 every rejected refresh token produces.
+///
+/// The text is fixed here rather than taken from [`Texts`](crate::texts::Texts):
+/// the token layer's messages move into the catalog when the refresh-token
+/// redesign lands, and until then a replayed or expired token keeps this exact
+/// wording (clients distinguish it from a missing session).
 fn invalid_refresh() -> ApiError {
-    ApiError::Unauthorized("invalid or expired refresh token".to_string())
+    ApiError::unauthorized("invalid or expired refresh token")
 }
 
 /// `now + ttl`, falling back to `now` on overflow so an absurdly large TTL
@@ -334,7 +340,7 @@ mod tests {
             .rotate(&pair.refresh_token, &claims)
             .await
             .expect_err("replay must fail");
-        assert!(matches!(err, ApiError::Unauthorized(_)));
+        assert_eq!(err.kind(), crate::error::ErrorKind::Unauthorized);
     }
 
     #[tokio::test]
@@ -344,7 +350,7 @@ mod tests {
             .rotate("no-such-token", &claims("alice"))
             .await
             .expect_err("unknown token must fail");
-        assert!(matches!(err, ApiError::Unauthorized(_)));
+        assert_eq!(err.kind(), crate::error::ErrorKind::Unauthorized);
         assert_eq!(err.to_string(), "invalid or expired refresh token");
     }
 
@@ -361,7 +367,7 @@ mod tests {
             .rotate("expired", &claims("alice"))
             .await
             .expect_err("expired token must fail");
-        assert!(matches!(err, ApiError::Unauthorized(_)));
+        assert_eq!(err.kind(), crate::error::ErrorKind::Unauthorized);
     }
 
     #[tokio::test]
@@ -376,7 +382,7 @@ mod tests {
             .rotate(&pair.refresh_token, &claims("alice"))
             .await
             .expect_err("revoked token must fail");
-        assert!(matches!(err, ApiError::Unauthorized(_)));
+        assert_eq!(err.kind(), crate::error::ErrorKind::Unauthorized);
     }
 
     #[test]

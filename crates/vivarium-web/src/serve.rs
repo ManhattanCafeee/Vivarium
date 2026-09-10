@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 
 /// Serve `app` on `listener` until the process shuts down.
 ///
-/// This is a thin wrapper over [`axum::serve`] that returns its [`io::Result`]
+/// This is a thin wrapper over [`axum::serve()`] that returns its [`io::Result`]
 /// rather than panicking: the caller decides how to surface a bind or accept
 /// failure, in keeping with the library's no-panic rule.
 ///

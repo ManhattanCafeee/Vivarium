@@ -1,44 +1,46 @@
 # vivarium
 
 Type-safe ergonomics on top of [sqlx] and [axum]: pagination, sorting
-whitelists, unified errors, validated extractors, generic CRUD, cookie
-sessions with sliding renewal, refresh-token rotation, and hot-reloadable
-config. A Rust port of the Go [natools4go] toolset — but the
+whitelists, one response envelope, validated extractors, generic CRUD with
+typed filters, cookie sessions with sliding renewal, refresh-token rotation,
+and hot-reloadable config. A Rust port of the Go [natools4go] toolset — but the
 value is not in ported utility functions (Rust's ecosystem covers those), it
 is in the type-safe layer built on sqlx/axum.
 
 | Crate | What |
 | --- | --- |
-| [`vivarium-core`] | `Page<T>` / `Pagination` / `Order` / `Column` / `Sorter` / `Entity` / `Value` |
+| [`vivarium-core`] | `Page<T>` / `Pagination` / `Order` / `Column` / `Sorter` / `Entity` / `PrimaryKey` / `Value` |
 | [`vivarium-macros`] | `#[derive(Entity)]` |
-| [`vivarium-db`] | sqlx: generic CRUD, chainable queries, pagination, migrations |
-| [`vivarium-web`] | axum: `ApiError`, `Varser`, JWT + session auth, refresh tokens, RBAC permissions, password hashing, `Cache-Control` layer |
+| [`vivarium-db`] | sqlx: generic CRUD, `Predicate` filters, `Update`, transactions, pagination |
+| [`vivarium-web`] | axum: `ApiResponse` / `ApiError`, extractors, JWT + session auth, refresh tokens, RBAC permissions, password hashing, OpenAPI helpers |
 | [`vivarium-config`] | figment + notify + arc-swap hot reload |
 | [`vivarium-rs`] | the facade: `cargo add vivarium-rs` is all you need |
 
-MSRV: 1.85. Drivers: SQLite, PostgreSQL, MySQL (sqlx 0.8 removed the MSSQL
-driver, so there is no `db-mssql` feature).
+MSRV: 1.94. Drivers: SQLite, PostgreSQL, MySQL (sqlx 0.9 has no MSSQL driver,
+so there is no `db-mssql` feature). Library strings (including default error
+messages) are English; applications localize them through `install_texts`.
 
 ## Quick start
 
 ```toml
 [dependencies]
-vivarium-rs = "0.1"       # default features: web, config, db, db-sqlite, db-postgres
+vivarium-rs = "0.3"       # default features: web, config, db, db-sqlite, db-postgres
+anyhow = "1"              # only for `main`'s error type in the example below
 axum = "0.8"
-sqlx = { version = "0.8", features = ["sqlite"] }
+sqlx = { version = "0.9", features = ["sqlite", "migrate"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
-garde = { version = "0.22", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 ```
 
 ### 1. A sqlite + axum service
 
 ```rust,no_run
 use axum::{Router, routing::post};
-use serde::Deserialize;
-use garde::Validate;
-use vivarium_rs::{ApiError, Initializer, Varser, create};
+use serde::{Deserialize, Serialize};
+use validator::Validate;
 use vivarium_rs::sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use vivarium_rs::{ApiError, ApiResponse, Initializer, Varser, create};
 
 #[derive(Clone, sqlx::FromRow, vivarium_rs::Entity)]
 #[entity(table = "users")]
@@ -49,41 +51,75 @@ struct User {
 
 #[derive(Deserialize, Validate)]
 struct NewUser {
-    #[garde(length(chars, min = 1, max = 100))]
+    #[validate(length(min = 1, max = 100, message = "name must be 1-100 characters"))]
     name: String,
 }
 
 impl Initializer for NewUser {} // run custom field initialization post-parse
 
+#[derive(Serialize)]
+struct UserJson {
+    id: i64,
+    name: String,
+}
+
 async fn create_user(
     state: axum::extract::State<SqlitePool>,
     Varser(new_user): Varser<NewUser>,   // deserialize + initialize + validate
-) -> Result<(), ApiError> {
-    create(&state.0, User { id: 0, name: new_user.name })
-        .await
-        .map_err(|e| ApiError::Internal { system: e.to_string() })?;
-    Ok(())
+) -> Result<ApiResponse<UserJson>, ApiError> {
+    let id = create(
+        &state.0,
+        User {
+            id: 0,
+            name: new_user.name.clone(),
+        },
+    )
+    .await
+    .map_err(ApiError::database)?;
+    Ok(ApiResponse::ok(UserJson {
+        id,
+        name: new_user.name,
+    }))
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let pool = SqlitePoolOptions::new().connect("sqlite://app.db").await?;
-    vivarium_rs::MIGRATOR.run(&pool).await?;
+    // Migrations are application-owned: the library ships no migrator, so a
+    // library-owned `_sqlx_migrations` table can never collide with yours.
+    // Copy `vivarium-db/examples/migrations/` as a starting layout.
+    sqlx::migrate!("./migrations").run(&pool).await?;
     let app = Router::new()
         .route("/users", post(create_user))
         .with_state(pool);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
-    vivarium_rs::serve(listener, app).await?;
+    vivarium_rs::serve::serve(listener, app).await?;
     Ok(())
 }
 ```
 
-Invalid bodies get `422 {"code":"VALIDATION","message":"[name]: [length is lower than 1]"}`.
+Every handler returns `ApiResponse<T>`; every failure is an `ApiError`. Both
+render the same body, so there is exactly one serialization path:
+
+```json
+{ "code": 0,   "message": "ok", "data": { "id": 1, "name": "ada" } }
+{ "code": 400, "message": "invalid request data", "data": null }
+{ "code": 422, "message": "validation failed",
+  "errors": { "name": [{ "code": "length", "message": "name must be 1-100 characters",
+                         "params": { "min": 1, "max": 100 } }] },
+  "data": null }
+{ "code": 500, "message": "database error", "data": null }
+```
+
+`code` is `0` on success and otherwise the HTTP status code, `data` is always
+present, `errors` appears only for a failed validation, and `system` appears
+only for an internal error while debug mode is on (`VIVARIUM_DEBUG=1` or
+`vivarium_rs::install_debug_mode(true)`).
 
 ### 2. Chainable queries
 
 ```rust,no_run
-use vivarium_rs::{Column, Order, Query, Sorter};
+use vivarium_rs::{Column, Order, Predicate, Query, Sorter};
 
 #[derive(Clone, Copy)]
 enum UserCol { Name, Age }
@@ -96,6 +132,7 @@ impl Column for UserCol {
 async fn active_above(pool: &vivarium_rs::sqlx::sqlite::SqlitePool, age: i64) -> sqlx::Result<Vec<User>> {
     Query::<_, User>::new()
         .where_eq(UserCol::Age, age)          // closed Value bind: compile-time checked
+        .filter(Predicate::starts_with(UserCol::Name, "ada"))
         .order_by(Sorter::new(UserCol::Name, Order::Desc))
         .limit(50)
         .find(pool)
@@ -103,8 +140,38 @@ async fn active_above(pool: &vivarium_rs::sqlx::sqlite::SqlitePool, age: i64) ->
 }
 ```
 
-Column names can only come from a `Column` impl — stringly-typed SQL
-injection is impossible. `Query` also has `first`, `count`, and `paginate`.
+Column names can only come from a `Column` impl — stringly-typed SQL injection
+is impossible, and every value is bound. `Query` also offers `first`
+(`ORDER BY … LIMIT 1`), `count`, `paginate`, `paginate_with_total`, `select`
+(projection), `filter` with the full `Predicate` tree (`and`/`or`/`negate`,
+`one_of`/`not_one_of`, `is_null`/`is_not_null`, `like` — `starts_with`/
+`contains` escape `%`/`_` so they match literally), and
+`raw_where(RawFragment)` as the explicit escape hatch (`?` is reserved for
+binds there).
+
+Partial updates and transactions stay in the same typed layer:
+
+```rust,no_run
+use vivarium_rs::{Expr, Update, with_transaction};
+
+async fn example(pool: &vivarium_rs::sqlx::sqlite::SqlitePool) -> sqlx::Result<()> {
+Update::<User, UserCol>::new(1_i64)
+    .set(UserCol::Name, "ada")
+    .execute(pool)
+    .await?;
+
+with_transaction(pool, async |tx| {
+    create(&mut **tx, User { id: 0, name: "ada".into() }).await?;
+    Update::<User, UserCol>::new(1_i64)
+        .set_expr(UserCol::Name, Expr::Now)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+})
+.await?;
+Ok(())
+}
+```
 
 ### 3. Pagination
 
@@ -112,7 +179,8 @@ injection is impossible. `Query` also has `first`, `count`, and `paginate`.
 let page = Query::<_, User>::new()
     .paginate(vivarium_rs::Pagination::new(2, 20), &pool)
     .await?;
-// page.total, page.content, page.pages(); out-of-range sizes normalized
+// page.items, page.total, page.page, page.per_page, page.pages()
+// out-of-range page/per_page values are normalized
 ```
 
 ### 4. JWT in three lines
@@ -155,40 +223,57 @@ unknown-user path constant-time against username enumeration.
 
 ```rust,no_run
 use std::sync::Arc;
-use vivarium_rs::Config;
+use vivarium_rs::{Config, ConfigOptions};
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct AppConfig {
     port: u16,
 }
 
-let config = Arc::new(Config::load("config.toml")?);
+let config = Arc::new(Config::load_with(
+    ConfigOptions::new("config.toml")
+        .defaults(&AppConfig { port: 8080 })   // 1. defaults
+        .file()                                // 2. config.toml (optional)
+        .env_prefixed("APP")                   // 3. APP__* variables
+        .separator("__"),
+)?);
 config.register(|cfg: &AppConfig| println!("port is now {}", cfg.port));
-config.clone().watch()?;          // watches the file, re-loads, fires handlers
-let cfg = config.get();           // lock-free Arc read
+config.on_error(|err| eprintln!("config error: {err}"));
+let watcher = Arc::clone(&config).watch()?;   // stops when the watcher drops
+let cfg = config.get();                       // lock-free Arc read
 ```
 
-### 7. Validation errors
+### 7. Validation errors and localization
 
-`Varser` rejects with `422` and a Go-style message — `[field]: [rule]`:
+`Varser` rejects with `400` for malformed input and `422` for semantic
+validation failures, with a structured `errors` payload keyed by field:
 
-```rust
-HTTP/1.1 422 Unprocessable Entity
-{"code":"VALIDATION","message":"[name]: [length is lower than 1]"}
+```json
+{ "code": 422, "message": "validation failed",
+  "errors": { "username": [{ "code": "length", "message": "用户名长度需在 3-20 之间",
+                             "params": { "min": 3, "max": 20 } }] },
+  "data": null }
 ```
 
-Internal details stay server-side: `ApiError::Internal { system }` only
-appears in the response while debug mode is on (`VIVARIUM_DEBUG=1` or
-`vivarium_rs::set_debug_mode(true)`).
+The envelope `message` comes from the library's catalog, which is English
+until the application installs its own once at startup —
+`install_texts(Texts { unauthorized: "缺少会话 Cookie".into(), ..Texts::default() })`
+— and `echo_details` additionally lets a `4xx` message repeat the parser's
+detail (useful when a custom `Deserialize` error must reach the client). A
+violation's own `message` is whatever the DTO declared in its
+`#[validate(message = "…")]` attribute, and the submitted field value is never
+echoed back in `params`.
 
 ## Features
 
 | Feature | Enables |
 | --- | --- |
-| `db` | query/CRUD layer, no driver |
-| `db-sqlite` / `db-postgres` / `db-mysql` | the matching driver |
+| `db` | query/CRUD layer, no driver (also turns on `vivarium-web/sqlx`, i.e. `ApiError::conflict_from_db`) |
+| `db-sqlite` / `db-postgres` / `db-mysql` | the matching driver (`db-mysql` enables sqlx's `mysql-rsa` for non-TLS servers) |
 | `web` | axum layer |
 | `config` | hot-reloadable config |
+| `validation-garde` | the `Garde*` extractors (bound to `garde::Validate`) in addition to the default validator-based ones |
+| `utoipa` / `utoipa-ui` | `ToSchema` derives plus the OpenAPI helpers (`utoipa-ui` downloads nothing: Swagger UI assets are vendored) |
 
 Defaults: `web`, `config`, `db`, `db-sqlite`, `db-postgres`.
 

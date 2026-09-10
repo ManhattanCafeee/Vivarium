@@ -98,7 +98,7 @@ async fn postgres_crud_round_trip() {
         .await
         .expect("paginate");
     assert_eq!(page.total, 1);
-    assert_eq!(page.content[0].name, "pg2");
+    assert_eq!(page.items[0].name, "pg2");
 
     assert_eq!(delete::<User, _>(&pool, id).await.expect("delete"), 1);
 }

@@ -52,12 +52,12 @@ impl PermissionSet {
     }
 
     /// Returns `Ok(())` when `target` is granted, otherwise
-    /// `Err(ApiError::Forbidden)` with a `permission denied` message.
+    /// `Err(ApiError::forbidden)` with a `permission denied` message.
     pub fn require(&self, target: &str) -> Result<(), ApiError> {
         if self.has(target) {
             Ok(())
         } else {
-            Err(ApiError::Forbidden(format!("permission denied: {target}")))
+            Err(ApiError::forbidden(format!("permission denied: {target}")))
         }
     }
 
@@ -101,7 +101,7 @@ mod tests {
 
         assert!(perms.require("user:write").is_ok());
         let err = perms.require("admin:x").expect_err("must be denied");
-        assert!(matches!(err, ApiError::Forbidden(_)));
+        assert_eq!(err.kind(), crate::error::ErrorKind::Forbidden);
         assert_eq!(err.to_string(), "permission denied: admin:x");
     }
 }

@@ -2,9 +2,19 @@
 //!
 //! Type-safe database ergonomics on top of [`sqlx`]: generic CRUD for
 //! [`Entity`] types, a chainable query builder with compile-time-checked
-//! bind values, and pagination built on [`Pagination`].
+//! bind values, a typed [`Predicate`] filter AST (with a documented raw
+//! escape hatch), partial-column [`Update`]s, transactions, and pagination
+//! built on [`Pagination`].
+//!
+//! # Migrations
+//!
+//! This crate ships **no** embedded migrator: a library-owned
+//! `_sqlx_migrations` table would collide with the host application's, and the
+//! example schema is SQLite-flavoured. Use [`sqlx::migrate!`] from the
+//! application (see `examples/migrations/` for a sample layout).
 //!
 //! ```no_run
+//! # #[cfg(feature = "sqlite")] {
 //! use vivarium_db::{Column, Entity, Order, Pagination, Query, Sorter, create, find_by_id};
 //! use sqlx::sqlite::SqlitePool;
 //!
@@ -39,6 +49,7 @@
 //! assert_eq!(page.total, 1);
 //! # Ok(())
 //! # }
+//! # }
 //! ```
 //!
 //! # Drivers
@@ -53,7 +64,10 @@
 
 pub mod crud;
 pub mod pool;
+pub mod predicate;
 pub mod query;
+pub mod transaction;
+pub mod update;
 
 mod driver;
 
@@ -61,8 +75,14 @@ mod driver;
 pub use driver::{DriverOps, Step};
 
 pub use crud::{count, create, delete, exists, find_by_id, update_by_id};
-pub use query::Query;
-pub use vivarium_core::{Column, Entity, Order, Page, Pagination, Sorter, Value};
+pub use predicate::Predicate;
+pub use query::{Query, RawFragment, RawFragmentError};
+pub use transaction::with_transaction;
+pub use update::{Expr, Update};
+pub use vivarium_core::{
+    Column, EncodeError, Entity, NullType, Order, Page, Pagination, PrimaryKey, PrimaryKeyError,
+    Sorter, Value,
+};
 pub use vivarium_macros::Entity;
 
 /// Re-export of the [`sqlx`] version this crate is built against, so users can
@@ -75,10 +95,20 @@ pub use sqlx;
 /// pass through unchanged.
 pub type Error = sqlx::Error;
 
-/// The embedded migrations of the example schema (`migrations/` directory).
+/// Converts an entity encoding failure into a driver error.
 ///
-/// Apply with [`sqlx::migrate::Migrator::run`] against a connection or pool.
-pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+/// `#[derive(Entity)]` reports a field that cannot be encoded (an
+/// `#[entity(json)]` field whose `Serialize` fails, for instance) as
+/// [`EncodeError`](vivarium_core::EncodeError); the CRUD helpers surface it as
+/// [`sqlx::Error::Encode`] so callers can keep matching on one error type.
+pub(crate) fn encode_error(error: vivarium_core::EncodeError) -> Error {
+    Error::Encode(Box::new(error))
+}
+
+/// Converts a primary-key conversion failure into a driver error.
+pub(crate) fn key_error(error: vivarium_core::PrimaryKeyError) -> Error {
+    Error::Encode(Box::new(error))
+}
 
 /// Returns true if `err` is a unique or primary-key constraint violation.
 ///

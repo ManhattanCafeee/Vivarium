@@ -26,6 +26,7 @@ fn main() {
     assert_eq!(Account::TABLE, "accounts");
     assert_eq!(Account::ID_COLUMN, "account_id");
     assert_eq!(account.id(), 7);
-    let names: Vec<&str> = account.columns_and_values().iter().map(|(c, _)| *c).collect();
+    let pairs = account.columns_and_values().expect("encodes");
+    let names: Vec<&str> = pairs.iter().map(|(c, _)| *c).collect();
     assert_eq!(names, vec!["name", "age", "meta"]);
 }

@@ -11,8 +11,9 @@ description = "vivarium-rs facade: feature-gated re-exports of the vivarium fami
 
 [features]
 default = ["web", "config", "db", "db-sqlite", "db-postgres"]
-# The core database layer (no driver).
-db = ["dep:vivarium-db"]
+# The core database layer (no driver). With `web` enabled this also turns on
+# `vivarium-web/sqlx`, so `ApiError::conflict_from_db` is available.
+db = ["dep:vivarium-db", "vivarium-web?/sqlx"]
 # SQLite driver.
 db-sqlite = ["db", "vivarium-db/sqlite"]
 # PostgreSQL driver.
@@ -23,6 +24,13 @@ db-mysql = ["db", "vivarium-db/mysql"]
 web = ["dep:vivarium-web"]
 # Hot-reloadable config.
 config = ["dep:vivarium-config"]
+# The `Garde*` extractors of `vivarium-web` (bound to `garde::Validate`).
+validation-garde = ["vivarium-web?/validation-garde"]
+# `ToSchema` derives for the shared types plus the `vivarium_web::openapi`
+# helpers (spec metadata and security schemes).
+utoipa = ["vivarium-core/utoipa", "vivarium-web?/utoipa"]
+# `openapi::mount`: serves the spec plus Scalar and Swagger UI.
+utoipa-ui = ["utoipa", "vivarium-web?/utoipa-ui"]
 
 [dependencies]
 vivarium-core = { version = "0.1.0", path = "../vivarium-core" }
@@ -35,7 +43,8 @@ vivarium-macros = { version = "0.1.0", path = "../vivarium-macros" }
 axum = { version = "0.8", features = ["json"] }
 http-body-util = "0.1.5"
 serde = { version = "1", features = ["derive"] }
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate", "json"] }
+serde_json = "1"
+sqlx = { version = "0.9", features = ["sqlite", "runtime-tokio", "macros", "migrate", "json", "chrono"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5.3", features = ["util"] }
-garde = { version = "0.22.1", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }

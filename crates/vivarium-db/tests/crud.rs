@@ -33,7 +33,10 @@ async fn pool() -> SqlitePool {
         .connect("sqlite::memory:")
         .await
         .expect("in-memory sqlite pool");
-    vivarium_db::MIGRATOR.run(&pool).await.expect("migrate");
+    sqlx::migrate!("./examples/migrations")
+        .run(&pool)
+        .await
+        .expect("migrate");
     pool
 }
 

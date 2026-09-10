@@ -7,6 +7,7 @@
 //! password" paths take the same Argon2 time, defeating username-enumeration
 //! timing side channels.
 
+use std::error::Error as _;
 use std::sync::LazyLock;
 
 use argon2::Argon2;
@@ -20,9 +21,17 @@ const DUMMY_PASSWORD: &str = "vivarium-timing-dummy";
 
 /// Cached dummy PHC string verified against when no stored hash exists.
 ///
-/// Computed on first use; a failure to hash a constant is treated as an
-/// [`ApiError::Internal`] and surfaced, never panicked on.
-static DUMMY_HASH: LazyLock<Result<String, ApiError>> = LazyLock::new(|| hash(DUMMY_PASSWORD));
+/// Computed on first use; a failure to hash a constant cannot be cloned out of
+/// a stored [`ApiError`], so the failure's detail is cached instead and turned
+/// back into a fresh error on the (unreachable in practice) path that needs it.
+static DUMMY_HASH: LazyLock<Result<String, String>> = LazyLock::new(|| {
+    hash(DUMMY_PASSWORD).map_err(|error| {
+        error
+            .source()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "password hashing failed".to_string())
+    })
+});
 
 /// Hashes `password` with Argon2 and returns the PHC-format string.
 ///
@@ -33,19 +42,16 @@ pub fn hash(password: &str) -> Result<String, ApiError> {
     argon2
         .hash_password(password.as_bytes(), &salt)
         .map(|h| h.to_string())
-        .map_err(|err| ApiError::Internal {
-            system: format!("password hashing failed: {err}"),
-        })
+        .map_err(|err| ApiError::internal(err.to_string()))
 }
 
 /// Verifies `password` against `stored_hash` (a PHC string from [`hash`]).
 ///
 /// Returns `Ok(false)` for a mismatch; a malformed `stored_hash` is
-/// `Err(ApiError::Internal)` — it indicates corruption, not a failed login.
+/// `Err(ApiError::internal)` — it indicates corruption, not a failed login.
 pub fn verify(password: &str, stored_hash: &str) -> Result<bool, ApiError> {
-    let parsed = PasswordHash::new(stored_hash).map_err(|err| ApiError::Internal {
-        system: format!("invalid stored hash: {err}"),
-    })?;
+    let parsed =
+        PasswordHash::new(stored_hash).map_err(|err| ApiError::internal(err.to_string()))?;
     let argon2 = Argon2::default();
     Ok(argon2.verify_password(password.as_bytes(), &parsed).is_ok())
 }
@@ -61,7 +67,7 @@ pub fn verify_login(password: &str, stored_hash: Option<&str>) -> Result<bool, A
         Some(hash) => hash,
         None => match &*DUMMY_HASH {
             Ok(hash) => hash.as_str(),
-            Err(err) => return Err(err.clone()),
+            Err(detail) => return Err(ApiError::internal(detail.clone())),
         },
     };
     verify(password, target)
@@ -95,6 +101,7 @@ mod tests {
     #[test]
     fn verify_login_malformed_hash_is_internal() {
         let err = verify_login("x", Some("not-a-phc-string")).expect_err("must reject");
-        assert!(matches!(err, ApiError::Internal { .. }));
+        assert_eq!(err.kind(), crate::error::ErrorKind::Internal);
+        assert!(std::error::Error::source(&err).is_some());
     }
 }

@@ -9,6 +9,22 @@ readme = "README.md"
 authors.workspace = true
 description = "Core types for vivarium: Page, Pagination, Order, Column, Sorter."
 
+[features]
+default = []
+# `chrono` values in [`Value`] (`DateTime<Utc>`, `NaiveDate`).
+chrono = ["dep:chrono"]
+# `uuid::Uuid` values in [`Value`].
+uuid = ["dep:uuid"]
+# Derives `ToSchema` for `Page`/`Pagination` and implements utoipa's
+# `IntoParams` for `Pagination`. Must live here: the impls and the types have
+# to share a crate.
+utoipa = ["dep:utoipa"]
+
 [dependencies]
+# `utoipa`'s derive comes from its default `macros` feature, so this cannot be
+# `default-features = false`.
+utoipa = { version = "5.5", optional = true }
+chrono = { version = "0.4.45", optional = true, default-features = false, features = ["std", "clock"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+uuid = { version = "1.26.0", optional = true }

@@ -21,7 +21,7 @@ use sqlx::types::Json;
 use sqlx::{Database, Executor, QueryBuilder};
 use std::future::Future;
 use std::pin::Pin;
-use vivarium_core::Value;
+use vivarium_core::{NullType, Value};
 
 use crate::Error;
 
@@ -71,10 +71,10 @@ pub trait DriverOps: Database + private::Sealed + Sized {
     /// doubled.
     fn quote_ident(name: &str) -> String;
 
-    /// Binds a [`Value`] by reference onto a query builder with
-    /// driver-correct types. No values are copied; the builder encodes them
-    /// into its argument buffer.
-    fn bind_value<'a>(qb: &mut QueryBuilder<'a, Self>, value: &'a Value);
+    /// Binds a [`Value`] onto a query builder with driver-correct types. The
+    /// builder encodes the value into its own argument buffer; the [`Value`]
+    /// itself is not cloned.
+    fn bind_value(qb: &mut QueryBuilder<Self>, value: &Value);
 
     /// Renders `prefix + clauses + suffix` with driver placeholders inlined,
     /// for debugging and SQL-text tests. Never touches a connection.
@@ -82,7 +82,7 @@ pub trait DriverOps: Database + private::Sealed + Sized {
         let mut qb = QueryBuilder::<Self>::new(prefix.to_owned());
         push_steps(&mut qb, clauses);
         qb.push(suffix);
-        qb.sql().to_owned()
+        qb.sql().as_str().to_owned()
     }
 
     /// Runs the built INSERT and returns the generated (or provided) id.
@@ -187,12 +187,12 @@ macro_rules! impl_driver_ops {
                 format!("{}{}{}", $quote, escaped, $quote)
             }
 
-            fn bind_value<'a>(qb: &mut QueryBuilder<'a, Self>, value: &'a Value) {
+            fn bind_value(qb: &mut QueryBuilder<Self>, value: &Value) {
                 match value {
                     Value::Null => {
-                        // INT8-typed NULL: PostgreSQL rejects `col = $1`
-                        // against non-integer columns at prepare time; use
-                        // raw sqlx for typed NULLs.
+                        // Untyped NULL, bound as INT8: PostgreSQL rejects
+                        // `col = $1` with it against non-integer columns at
+                        // prepare time. `TypedNull` avoids that.
                         qb.push_bind(Option::<i64>::None);
                     }
                     Value::I64(v) => {
@@ -212,6 +212,44 @@ macro_rules! impl_driver_ops {
                     }
                     Value::Json(v) => {
                         qb.push_bind(Json(v));
+                    }
+                    Value::TypedNull(null_type) => match null_type {
+                        NullType::I64 => {
+                            qb.push_bind(Option::<i64>::None);
+                        }
+                        NullType::F64 => {
+                            qb.push_bind(Option::<f64>::None);
+                        }
+                        NullType::Bool => {
+                            qb.push_bind(Option::<bool>::None);
+                        }
+                        NullType::Text => {
+                            qb.push_bind(Option::<&str>::None);
+                        }
+                        NullType::Bytes => {
+                            qb.push_bind(Option::<Vec<u8>>::None);
+                        }
+                        NullType::Json => {
+                            qb.push_bind(Option::<Json<serde_json::Value>>::None);
+                        }
+                        NullType::DateTime => {
+                            qb.push_bind(Option::<chrono::DateTime<chrono::Utc>>::None);
+                        }
+                        NullType::NaiveDate => {
+                            qb.push_bind(Option::<chrono::NaiveDate>::None);
+                        }
+                        NullType::Uuid => {
+                            qb.push_bind(Option::<uuid::Uuid>::None);
+                        }
+                    },
+                    Value::DateTime(v) => {
+                        qb.push_bind(*v);
+                    }
+                    Value::NaiveDate(v) => {
+                        qb.push_bind(*v);
+                    }
+                    Value::Uuid(v) => {
+                        qb.push_bind(*v);
                     }
                 }
             }
@@ -338,7 +376,7 @@ macro_rules! impl_driver_ops {
 
 /// Pushes text and bind steps onto a query builder in order. Binds are
 /// pushed by reference; nothing is copied beyond the builder's own encoding.
-fn push_steps<'a, DB: DriverOps>(qb: &mut QueryBuilder<'a, DB>, steps: &'a [Step]) {
+fn push_steps<DB: DriverOps>(qb: &mut QueryBuilder<DB>, steps: &[Step]) {
     for step in steps {
         match step {
             Step::Text(text) => {
