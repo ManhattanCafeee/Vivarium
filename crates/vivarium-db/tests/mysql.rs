@@ -54,6 +54,9 @@ fn user(name: &str, email: &str, age: i32) -> User {
 #[tokio::test]
 async fn mysql_crud_query_update_transaction_and_round_trips() {
     let Ok(url) = std::env::var("MYSQL_DATABASE_URL") else {
+        if std::env::var("VIVARIUM_REQUIRE_MYSQL").is_ok() {
+            panic!("MYSQL_DATABASE_URL is required when VIVARIUM_REQUIRE_MYSQL is set");
+        }
         eprintln!("skipping: MYSQL_DATABASE_URL not set");
         return;
     };

@@ -10,6 +10,11 @@ env:
   # MYSQL_DATABASE_URL so the two can run in the same job.
   DATABASE_URL: postgres://postgres:postgres@localhost:5432/vivarium
   MYSQL_DATABASE_URL: mysql://root:root@127.0.0.1:3306/vivarium
+  # The driver tests self-skip when their URL is unset. In CI that would turn a
+  # missing or misconfigured service into a green job with zero coverage, so
+  # these flags make the tests panic instead of returning early.
+  VIVARIUM_REQUIRE_POSTGRES: "1"
+  VIVARIUM_REQUIRE_MYSQL: "1"
 
 jobs:
   check:
@@ -56,6 +61,18 @@ jobs:
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
       - name: Test (PostgreSQL + MySQL integration)
         run: cargo test --workspace --all-features
+      - name: README doctests really ran
+        # The root README is compiled as doctests by `vivarium-rs` only under
+        # `doctest` plus the `web`, `config` and `db-sqlite` features; without
+        # them the run silently skips those tests and still exits 0. `--all-features`
+        # must therefore produce `ReadmeDoctests` entries in the output. The log
+        # file keeps `grep -q` from closing the pipe early (which would send
+        # SIGPIPE into the test harness); `pipefail` keeps cargo's exit code
+        # authoritative — `grep` is only the "did it really run" probe.
+        run: |
+          set -eo pipefail
+          cargo test --doc -p vivarium-rs --all-features 2>&1 | tee /tmp/readme-doctests.log
+          grep -q ReadmeDoctests /tmp/readme-doctests.log
       - name: Feature combinations
         # `--all-features` cannot prove that a single feature compiles on its
         # own, so the optional features are checked individually.

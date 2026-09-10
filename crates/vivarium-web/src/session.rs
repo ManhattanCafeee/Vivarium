@@ -608,11 +608,14 @@ where
         match (&live, &session, &digest) {
             (Some(record), Some(id), Some(digest)) => {
                 if should_extend(record, auth.ttl()) && !handler_owns_cookie {
-                    // The session survived the lookup, so its absolute deadline
-                    // is still ahead: the renewal below can only move forward.
                     // Time is read again here — the lookup's `now` predates the
                     // handler, and the browser starts counting `Max-Age` when
-                    // the response arrives.
+                    // the response arrives. That also means survival at lookup
+                    // does not guarantee the renewal lands before the absolute
+                    // deadline: if the handler ran past it, `expiry` returns
+                    // that already-elapsed deadline, and the `Max-Age` below
+                    // floors to 1 second so the browser drops the cookie on the
+                    // next request, where the session reads as dead.
                     let renewed_at = Utc::now();
                     let renewed = auth.expiry(record.created_at, renewed_at);
                     match auth.store().touch(digest, renewed, renewed_at).await {
@@ -1197,6 +1200,45 @@ mod tests {
         assert!(
             (25..=30).contains(&age),
             "cookie must expire with the cap, got Max-Age={age}: {cookie}"
+        );
+    }
+
+    /// A handler that outlives the absolute deadline renews to an expiry that
+    /// has already elapsed. The cookie must still carry the `Max-Age` floor of
+    /// one second, so the browser drops it and the session dies next request.
+    #[tokio::test]
+    async fn renewal_landing_on_an_elapsed_deadline_sends_max_age_one() {
+        let now = Utc::now();
+        let store = InMemorySessionStore::default();
+        // Five-second cap, created four seconds ago: the deadline is ~1s away,
+        // the idle time makes renewal due, and the sliding expiry is far out —
+        // so the session is alive at lookup but cannot renew past the cap.
+        let created_at = now - TimeDelta::seconds(4);
+        let deadline = created_at + TimeDelta::seconds(5);
+        store.insert(
+            &hash_token("raw"),
+            record(
+                7,
+                created_at,
+                now + TimeDelta::seconds(60),
+                now - TimeDelta::seconds(61),
+            ),
+        );
+        let app = me_app(auth(store.clone(), Some(Duration::from_secs(5))));
+
+        let (status, response) = drive(app, req_get("/me", Some("sid=raw"))).await;
+        assert_eq!(status, StatusCode::OK);
+        // Read the headers before the body consumes the response.
+        let renewed_max_age = max_age(&set_cookies(&response));
+        assert_eq!(body_text(response).await, "7");
+        assert_eq!(renewed_max_age, 1);
+        assert_eq!(
+            store
+                .get(&hash_token("raw"))
+                .expect("session kept")
+                .expires_at,
+            deadline,
+            "the renewal must stop at the cap, not extend past it"
         );
     }
 

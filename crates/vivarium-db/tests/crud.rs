@@ -3,7 +3,7 @@
 
 use serde_json::json;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
-use vivarium_db::{count, create, delete, exists, find_by_id, update_by_id};
+use vivarium_db::{Entity, Value, count, create, delete, exists, find_by_id, update_by_id};
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, vivarium_db::Entity)]
 #[entity(table = "users", crate = "vivarium_db")]
@@ -185,4 +185,60 @@ async fn a_json_field_that_cannot_serialize_is_an_encode_error() {
         0,
         "nothing may be written when the entity cannot be encoded"
     );
+}
+
+/// An entity whose non-id `u64` field bounds to `Value::I64`. Values above
+/// `i64::MAX` have no `i64` representation and must be reported instead of
+/// wrapping to a negative number.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow, vivarium_db::Entity)]
+#[entity(table = "hit_rows", crate = "vivarium_db")]
+struct HitRow {
+    #[entity(id)]
+    id: i64,
+    hits: u64,
+}
+
+#[test]
+fn a_non_id_u64_field_within_i64_max_encodes() {
+    let columns = HitRow { id: 7, hits: 42 }
+        .columns_and_values()
+        .expect("42 fits in i64");
+    assert_eq!(columns, vec![("hits", Value::I64(42))]);
+}
+
+#[test]
+fn a_non_id_u64_field_above_i64_max_is_an_encode_error() {
+    let error = HitRow {
+        id: 0,
+        hits: u64::MAX,
+    }
+    .columns_and_values()
+    .expect_err("u64::MAX has no i64 representation");
+    assert!(
+        error.to_string().contains("above i64::MAX"),
+        "the encode error must name the overflow, got {error}"
+    );
+}
+
+#[tokio::test]
+async fn create_with_an_out_of_range_u64_field_writes_nothing() {
+    let pool = pool().await;
+    sqlx::query(
+        "CREATE TABLE hit_rows (id INTEGER PRIMARY KEY AUTOINCREMENT, hits INTEGER NOT NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("schema");
+
+    let error = create(
+        &pool,
+        HitRow {
+            id: 0,
+            hits: u64::MAX,
+        },
+    )
+    .await
+    .expect_err("nothing may be inserted when the entity cannot be encoded");
+    assert!(matches!(error, sqlx::Error::Encode(_)), "got {error:?}");
+    assert_eq!(count::<HitRow, _>(&pool).await.expect("count"), 0);
 }

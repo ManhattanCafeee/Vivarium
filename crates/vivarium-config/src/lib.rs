@@ -119,10 +119,11 @@ pub enum ConfigError {
     #[error("unsupported config file extension `{0}` (expected toml, yaml, yml, or json)")]
     UnsupportedExtension(String),
 
-    /// An update handler panicked; the panic was caught and reported here.
+    /// An update handler or a user-supplied [`Provider`] panicked; the panic
+    /// was caught and reported here.
     ///
     /// Watching continues after this error.
-    #[error("configuration handler panicked: {0}")]
+    #[error("configuration handler or provider panicked: {0}")]
     HandlerPanic(String),
 
     /// The watcher thread panicked, so it could not be joined cleanly.
@@ -444,8 +445,8 @@ where
     /// registration order.
     ///
     /// Errors that reach this handler are reload failures, file-watching
-    /// errors, and panics of other handlers. A panicking error handler is
-    /// logged and ignored.
+    /// errors, and panics of other handlers or of user providers. A panicking
+    /// error handler is logged and ignored.
     pub fn on_error<F>(&self, handler: F) -> HandlerId
     where
         F: Fn(&ConfigError) + Send + Sync + 'static,
@@ -640,8 +641,18 @@ where
                             if drain_events(&rx) {
                                 return;
                             }
-                            // Failures are reported by `reload` itself.
-                            let _ = config.reload();
+                            // A panic escaping `reload`, such as a user
+                            // provider panicking in `data()`, must not kill
+                            // this thread or updates would stop silently.
+                            match catch_unwind(AssertUnwindSafe(|| config.reload())) {
+                                Ok(Ok(_)) => {}
+                                // `reload` reports extraction failures itself.
+                                Ok(Err(_)) => {}
+                                Err(payload) => {
+                                    let panic = ConfigError::HandlerPanic(panic_message(&*payload));
+                                    config.report_error(&panic);
+                                }
+                            }
                         }
                         Ok(WatcherSignal::Event(Err(err))) => {
                             config.report_error(&ConfigError::Notify(err));
@@ -1363,6 +1374,78 @@ mod tests {
         assert!(panic.contains("handler exploded"), "{panic}");
 
         // The watcher survived both the panic and the failed handler.
+        std::fs::write(&path, toml("third", 3)).unwrap();
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(10)).unwrap(),
+            "third"
+        );
+    }
+
+    /// A user provider whose second `data()` call panics, as a buggy provider
+    /// would: the first call runs while loading, so reloads hit the panic.
+    struct PanickingProvider {
+        calls: AtomicUsize,
+    }
+
+    impl Provider for PanickingProvider {
+        fn metadata(&self) -> Metadata {
+            Metadata::named("test panicking provider")
+        }
+
+        fn data(&self) -> Result<ProfileMap<Profile, Dict>, figment::Error> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                panic!("provider exploded");
+            }
+
+            let mut values = Dict::new();
+            values.insert(
+                "provider_marker".to_owned(),
+                figment::value::Value::from("ok"),
+            );
+
+            let mut profiles = ProfileMap::new();
+            profiles.insert(Profile::Default, values);
+            Ok(profiles)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn panic_in_a_provider_is_reported_and_watching_continues() {
+        let (_dir, path) = config_file(&toml("old", 1));
+        let provider = PanickingProvider {
+            calls: AtomicUsize::new(0),
+        };
+        let options = ConfigOptions::new(&path).file().merge(provider);
+        let config = Arc::new(Config::<AppConfig>::load_with(options).unwrap());
+
+        let (updates, observed) = mpsc::channel();
+        config.register(move |c: &AppConfig| {
+            let _ = updates.send(c.name.clone());
+        });
+
+        let (errors, reported) = mpsc::channel();
+        config.on_error(move |err| {
+            let is_handler_panic = matches!(err, ConfigError::HandlerPanic(_));
+            let _ = errors.send((is_handler_panic, err.to_string()));
+        });
+
+        let _watcher = Arc::clone(&config).watch().unwrap();
+
+        // This reload panics inside the provider, which without catching would
+        // kill the watcher thread.
+        std::fs::write(&path, toml("second", 2)).unwrap();
+        let (is_handler_panic, panic) = reported.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(panic.contains("provider exploded"), "{panic}");
+        assert!(is_handler_panic, "{panic}");
+
+        // The failed reload called no update handler and kept the old value.
+        assert_eq!(
+            observed.recv_timeout(Duration::from_millis(300)),
+            Err(RecvTimeoutError::Timeout)
+        );
+        assert_eq!(config.get().name, "old");
+
+        // A later reload from a live watcher still updates the value.
         std::fs::write(&path, toml("third", 3)).unwrap();
         assert_eq!(
             observed.recv_timeout(Duration::from_secs(10)).unwrap(),

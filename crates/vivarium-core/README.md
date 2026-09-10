@@ -4,6 +4,9 @@ Core value types of the [vivarium](https://github.com/ManhattanCafeee/Vivarium)
 family: pagination, ordering, result pages, bindable values, and the `Entity`
 contract — the shared vocabulary between `vivarium-db` and `vivarium-web`.
 
+> The code snippets in this file are illustrative and are not compiled by CI;
+> the compiled examples live in the root README.
+
 ## What's inside
 
 - [`Pagination`] — 1-based page requests; construction normalizes out-of-range

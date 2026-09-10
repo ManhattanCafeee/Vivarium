@@ -25,7 +25,6 @@ log = "0.4.34"
 serde_json = "1.0.151"
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "json", "chrono", "uuid", "runtime-tokio"] }
 uuid = "1.26.0"
-tracing = "0.1.44"
 vivarium-core = { version = "0.3.0", path = "../vivarium-core", features = ["chrono", "uuid"] }
 vivarium-macros = { version = "0.3.0", path = "../vivarium-macros" }
 

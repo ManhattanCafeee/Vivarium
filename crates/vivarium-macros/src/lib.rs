@@ -215,7 +215,7 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
         let col_lit = attrs
             .rename
             .unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
-        let value = value_expr(field, &quote!(self.#ident), attrs.json, &anchor)?;
+        let value = value_expr(field, &quote!(self.#ident), attrs.json, &col_lit, &anchor)?;
         column_pushes.push(quote! {
             out.push((#col_lit, #value));
         });
@@ -269,13 +269,14 @@ const UNSUPPORTED_OPTION: &str = "#[derive(Entity)] does not support this field 
 
 /// Generates the `Value` conversion expression for a field.
 ///
-/// `access` is a place expression for the field (`self.name`). `Option<T>`
-/// fields bind as typed NULLs so drivers that check parameter types accept
-/// them.
+/// `access` is a place expression for the field (`self.name`). `column` is the
+/// column the field maps to, used in error messages. `Option<T>` fields bind
+/// as typed NULLs so drivers that check parameter types accept them.
 fn value_expr(
     field: &syn::Field,
     access: &proc_macro2::TokenStream,
     json: bool,
+    column: &LitStr,
     anchor: &syn::Path,
 ) -> Result<proc_macro2::TokenStream> {
     if json {
@@ -286,7 +287,7 @@ fn value_expr(
         });
     }
     let ty = &field.ty;
-    if let Some(expr) = scalar_value_expr(ty, access, false, anchor) {
+    if let Some(expr) = scalar_value_expr(ty, access, false, column, anchor) {
         return Ok(expr);
     }
     if let Type::Path(type_path) = ty
@@ -295,7 +296,7 @@ fn value_expr(
         && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
         && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
     {
-        let inner_expr = value_expr_inner(inner, &quote!(v), anchor)?;
+        let inner_expr = value_expr_inner(inner, &quote!(v), column, anchor)?;
         let null_variant =
             null_variant(inner).ok_or_else(|| Error::new_spanned(inner, UNSUPPORTED_OPTION))?;
         let null_ident = format_ident!("{null_variant}");
@@ -316,19 +317,22 @@ fn value_expr(
 fn value_expr_inner(
     ty: &Type,
     access: &proc_macro2::TokenStream,
+    column: &LitStr,
     anchor: &syn::Path,
 ) -> Result<proc_macro2::TokenStream> {
-    scalar_value_expr(ty, access, true, anchor)
+    scalar_value_expr(ty, access, true, column, anchor)
         .ok_or_else(|| Error::new_spanned(ty, UNSUPPORTED_OPTION))
 }
 
 /// The `Value` constructor for a supported scalar field type, if any.
 ///
 /// With `by_ref` the access token evaluates to a `&T` and is dereferenced.
+/// `column` is the column the field maps to, used in error messages.
 fn scalar_value_expr(
     ty: &Type,
     access: &proc_macro2::TokenStream,
     by_ref: bool,
+    column: &LitStr,
     anchor: &syn::Path,
 ) -> Option<proc_macro2::TokenStream> {
     let deref = |token: &proc_macro2::TokenStream| {
@@ -342,6 +346,19 @@ fn scalar_value_expr(
 
     if type_is(ty, &["i64"]) {
         Some(quote!(#anchor::Value::I64(#value)))
+    } else if is_lossy_integer_type(ty) {
+        // `u64`, `usize` and `isize` reach past `i64::MAX`, so `as i64` would
+        // silently wrap; ask `TryFrom` instead and report the column.
+        let message = LitStr::new(
+            &format!("column {} holds an integer above i64::MAX", column.value()),
+            column.span(),
+        );
+        Some(quote! {
+            #anchor::Value::I64(
+                <i64 as ::std::convert::TryFrom<#ty>>::try_from(#value)
+                    .map_err(|_| #anchor::EncodeError::new(#message))?
+            )
+        })
     } else if is_integer_type(ty) {
         Some(quote!(#anchor::Value::I64(#value as i64)))
     } else if type_is(ty, &["f64"]) {
@@ -415,12 +432,21 @@ fn is_primary_key_type(ty: &Type) -> bool {
 
 /// True for the integer types mapped onto `Value::I64` (`i64` excluded; it is
 /// handled separately so it can be passed through without a cast).
+///
+/// `u64`/`usize`/`isize` are not included: they are handled by
+/// [`is_lossy_integer_type`], which converts with a checked conversion.
 fn is_integer_type(ty: &Type) -> bool {
     [
         "i8", "i16", "i32", "u8", "u16", "u32", "u64", "usize", "isize",
     ]
     .iter()
     .any(|name| type_is(ty, &[*name]))
+}
+
+/// True for the integer types whose range reaches past `i64::MAX`, so the
+/// conversion onto `Value::I64` must be checked instead of using `as i64`.
+fn is_lossy_integer_type(ty: &Type) -> bool {
+    type_is(ty, &["u64"]) || type_is(ty, &["usize"]) || type_is(ty, &["isize"])
 }
 
 /// True for `Vec<u8>` (however it is qualified), which maps onto

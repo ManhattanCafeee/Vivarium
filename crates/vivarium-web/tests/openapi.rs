@@ -1,11 +1,12 @@
 //! The generated OpenAPI document follows this crate's conventions.
 //!
-//! Three minimal handlers stand in for a real API — a success, a validation
-//! failure and an authentication failure. The test renders their spec and
-//! checks the parts a generated SDK depends on: every operation has an
-//! `operation_id`, `ApiResponse<…>` becomes an `ApiResponse_*` component named
-//! `{Base}_{Child}`, both security schemes are registered, error responses
-//! declare **no** body, and `info` comes from [`vivarium_web::openapi::info`].
+//! Four minimal handlers stand in for a real API — a success, a nested page
+//! envelope, a validation failure and an authentication failure. The test
+//! renders their spec and checks the parts a generated SDK depends on: every
+//! operation has an `operation_id`, `ApiResponse<…>` becomes an
+//! `ApiResponse_*` component named `{Base}_{Child}`, both security schemes are
+//! registered, error responses declare **no** body, and `info` comes from
+//! [`vivarium_web::openapi::info`].
 //!
 //! The whole document is compared against `tests/golden/openapi.json`; run with
 //! `UPDATE_GOLDEN=1` to regenerate it.
@@ -23,6 +24,7 @@ use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 use utoipa::ToSchema;
+use vivarium_core::Page;
 use vivarium_web::openapi::{self, OpenApiRouter, routes};
 use vivarium_web::{ApiError, ApiResponse, Initializer, SessionCtx, Varser};
 
@@ -55,6 +57,27 @@ impl Initializer for CreateUserReq {}
 )]
 async fn list_users() -> Result<axum::Json<ApiResponse<Vec<User>>>, ApiError> {
     Ok(axum::Json(ApiResponse::ok(Vec::new())))
+}
+
+/// The nested-envelope case: a page of users. `Page<User>` pins utoipa's
+/// composed component name for a generic child (`Page`'s own name is fixed by
+/// its derive in `vivarium-core`).
+#[utoipa::path(
+    get, path = "/users/page", tag = "user",
+    operation_id = "User__page",
+    responses(
+        (status = 200, body = ApiResponse<Page<User>>),
+        (status = 401, description = "authentication required"),
+    ),
+    security(("session" = [])),
+)]
+async fn page_users() -> Result<axum::Json<ApiResponse<Page<User>>>, ApiError> {
+    Ok(axum::Json(ApiResponse::ok(Page {
+        items: Vec::new(),
+        total: 0,
+        page: 1,
+        per_page: 20,
+    })))
 }
 
 /// The validation-failure case: a body extractor that can reject with 422.
@@ -96,6 +119,7 @@ async fn me(_session: SessionCtx) -> Result<axum::Json<ApiResponse<User>>, ApiEr
 fn build() -> (Router, utoipa::openapi::OpenApi) {
     let (router, mut api) = OpenApiRouter::new()
         .routes(routes!(list_users))
+        .routes(routes!(page_users))
         .routes(routes!(create_user))
         .routes(routes!(me))
         .split_for_parts();
@@ -149,7 +173,7 @@ fn every_operation_has_an_operation_id() {
             assert_eq!(tag, tag.to_lowercase(), "tags are lower-case: {tag}");
         }
     }
-    assert_eq!(operations, 3, "the three golden handlers");
+    assert_eq!(operations, 4, "the four golden handlers");
 }
 
 /// `ApiResponse<T>` components keep utoipa's `{Base}_{Child}` naming.
@@ -170,6 +194,7 @@ fn api_response_schemas_follow_the_naming_rule() {
     assert_eq!(
         envelopes,
         vec![
+            "ApiResponse_Page_User".to_string(),
             "ApiResponse_User".to_string(),
             "ApiResponse_Vec_User".to_string()
         ],
@@ -316,6 +341,22 @@ async fn the_golden_handlers_serve_what_they_declare() {
     assert_eq!(
         body_json(response).await,
         serde_json::json!({ "code": 0, "message": "ok", "data": [] })
+    );
+
+    // The nested page envelope.
+    let response = router
+        .clone()
+        .oneshot(request("GET", "/users/page", ""))
+        .await
+        .expect("serves");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(response).await,
+        serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": { "items": [], "total": 0, "page": 1, "per_page": 20 }
+        })
     );
 
     // A validation failure is the 422 the spec declares, with structured errors.

@@ -6,6 +6,9 @@ Typed, hot-reloadable configuration for the
 [notify](https://github.com/notify-rs/notify) (file watching), and
 [arc-swap](https://github.com/vorner/arc-swap) (lock-free reads).
 
+> The code snippets in this file are illustrative and are not compiled by CI;
+> the compiled examples live in the root README.
+
 ## Quick start
 
 ```rust,ignore

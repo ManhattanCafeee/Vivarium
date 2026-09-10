@@ -9,6 +9,17 @@
 //! these steps use axum's [`axum::Json`], [`axum::extract::Query`],
 //! [`axum::extract::Path`] or [`axum::extract::Form`].
 //!
+//! # Body and non-body extractors
+//!
+//! `QueryVarser`/`PathVarser` (and the garde `GardeQueryVarser`/
+//! `GardePathVarser`) read the request URI only, so they implement
+//! [`axum::extract::FromRequestParts`] and may appear
+//! anywhere in a handler's argument list. `Varser`/`FormVarser` (and
+//! `GardeVarser`/`GardeFormVarser`) consume the request body: they implement
+//! [`axum::extract::FromRequest`], are limited to the last
+//! argument, and every extractor before them must implement
+//! `FromRequestParts`.
+//!
 //! Rejections follow the crate's status-code contract:
 //!
 //! | Failure | Status | Kind |
@@ -31,6 +42,8 @@ use axum::body::Bytes;
 use axum::extract::{Form, FromRequest, FromRequestParts, Path, Query, Request};
 use axum::http::HeaderMap;
 use axum::http::header;
+#[cfg(any(feature = "validation-validator", feature = "validation-garde"))]
+use axum::http::request::Parts;
 #[cfg(any(feature = "validation-validator", feature = "validation-garde"))]
 use serde::de::DeserializeOwned;
 
@@ -80,16 +93,15 @@ where
 pub struct QueryVarser<T>(pub T);
 
 #[cfg(feature = "validation-validator")]
-impl<S, T> FromRequest<S> for QueryVarser<T>
+impl<S, T> FromRequestParts<S> for QueryVarser<T>
 where
     S: Send + Sync,
     T: DeserializeOwned + validator::Validate + Initializer + Send + Sync,
 {
     type Rejection = ApiError;
 
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let (mut parts, _body) = req.into_parts();
-        let Query(value) = Query::<T>::from_request_parts(&mut parts, state)
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Query(value) = Query::<T>::from_request_parts(parts, state)
             .await
             .map_err(|error| detail(ErrorKind::BadRequest, error.to_string()))?;
         Ok(Self(initialize_and_validate(value)?))
@@ -101,16 +113,15 @@ where
 pub struct PathVarser<T>(pub T);
 
 #[cfg(feature = "validation-validator")]
-impl<S, T> FromRequest<S> for PathVarser<T>
+impl<S, T> FromRequestParts<S> for PathVarser<T>
 where
     S: Send + Sync,
     T: DeserializeOwned + validator::Validate + Initializer + Send + Sync,
 {
     type Rejection = ApiError;
 
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let (mut parts, _body) = req.into_parts();
-        let Path(value) = Path::<T>::from_request_parts(&mut parts, state)
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Path(value) = Path::<T>::from_request_parts(parts, state)
             .await
             .map_err(|error| detail(ErrorKind::BadRequest, error.to_string()))?;
         Ok(Self(initialize_and_validate(value)?))
@@ -177,7 +188,7 @@ where
 pub struct GardeQueryVarser<T>(pub T);
 
 #[cfg(feature = "validation-garde")]
-impl<S, T> FromRequest<S> for GardeQueryVarser<T>
+impl<S, T> FromRequestParts<S> for GardeQueryVarser<T>
 where
     S: Send + Sync,
     T: DeserializeOwned + garde::Validate + Initializer + Send + Sync,
@@ -185,9 +196,8 @@ where
 {
     type Rejection = ApiError;
 
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let (mut parts, _body) = req.into_parts();
-        let Query(value) = Query::<T>::from_request_parts(&mut parts, state)
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Query(value) = Query::<T>::from_request_parts(parts, state)
             .await
             .map_err(|error| detail(ErrorKind::BadRequest, error.to_string()))?;
         Ok(Self(initialize_and_validate_garde(value)?))
@@ -199,7 +209,7 @@ where
 pub struct GardePathVarser<T>(pub T);
 
 #[cfg(feature = "validation-garde")]
-impl<S, T> FromRequest<S> for GardePathVarser<T>
+impl<S, T> FromRequestParts<S> for GardePathVarser<T>
 where
     S: Send + Sync,
     T: DeserializeOwned + garde::Validate + Initializer + Send + Sync,
@@ -207,9 +217,8 @@ where
 {
     type Rejection = ApiError;
 
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let (mut parts, _body) = req.into_parts();
-        let Path(value) = Path::<T>::from_request_parts(&mut parts, state)
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Path(value) = Path::<T>::from_request_parts(parts, state)
             .await
             .map_err(|error| detail(ErrorKind::BadRequest, error.to_string()))?;
         Ok(Self(initialize_and_validate_garde(value)?))
@@ -640,5 +649,256 @@ mod garde_tests {
             .validate()
             .is_err()
         );
+    }
+}
+
+/// Pins the extractor *position* contract: the query/path variants are
+/// `FromRequestParts`, so a handler may combine them with the single body
+/// extractor it is allowed to consume. Each case registers a real `Router`, so
+/// the combination stops compiling if a parts extractor regresses to
+/// `FromRequest`.
+#[cfg(all(test, feature = "validation-validator"))]
+mod validator_composition_tests {
+    use super::{Initializer, PathVarser, QueryVarser, Varser};
+    use crate::session::SessionCtx;
+    use crate::texts::texts;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::extract::Request;
+    use axum::http::{StatusCode, header};
+    use axum::middleware::{self, Next};
+    use axum::response::Response;
+    use axum::routing::post;
+    use http_body_util::BodyExt;
+    use serde::Deserialize;
+    use tower::ServiceExt;
+    use validator::Validate;
+
+    async fn drive(app: Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let response = app.oneshot(req).await.expect("request succeeds");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    #[derive(Debug, Deserialize, Validate)]
+    struct IdParam {
+        #[validate(range(min = 1, message = "must be positive"))]
+        id: u32,
+    }
+
+    impl Initializer for IdParam {}
+
+    #[derive(Debug, Deserialize, Validate)]
+    struct Payload {
+        #[validate(length(min = 3, message = "too short"))]
+        name: String,
+    }
+
+    impl Initializer for Payload {}
+
+    #[derive(Debug, Deserialize, Validate)]
+    struct Search {
+        #[validate(length(min = 1, message = "required"))]
+        q: String,
+    }
+
+    impl Initializer for Search {}
+
+    fn json_post(uri: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request builds")
+    }
+
+    /// `(PathVarser, Varser)`: the path extractor precedes the body extractor.
+    #[tokio::test]
+    async fn path_extractor_precedes_the_body_extractor() {
+        let app = Router::new().route(
+            "/x/{id}",
+            post(
+                |PathVarser(param): PathVarser<IdParam>, Varser(body): Varser<Payload>| async move {
+                    axum::Json(format!("{}:{}", param.id, body.name))
+                },
+            ),
+        );
+
+        let (status, body) = drive(app, json_post("/x/42", r#"{"name":"ada"}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::Value::String("42:ada".to_string()));
+    }
+
+    /// `(QueryVarser, Varser)`.
+    #[tokio::test]
+    async fn query_extractor_precedes_the_body_extractor() {
+        let app = Router::new().route(
+            "/search",
+            post(
+                |QueryVarser(search): QueryVarser<Search>,
+                 Varser(body): Varser<Payload>| async move {
+                    axum::Json(format!("{}:{}", search.q, body.name))
+                },
+            ),
+        );
+
+        let (status, body) = drive(app, json_post("/search?q=hello", r#"{"name":"ada"}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::Value::String("hello:ada".to_string()));
+    }
+
+    /// `(SessionCtx, PathVarser, Varser)`: two parts extractors before the body.
+    #[tokio::test]
+    async fn session_and_path_extractors_precede_the_body_extractor() {
+        async fn authenticate(mut request: Request, next: Next) -> Response {
+            request
+                .extensions_mut()
+                .insert(SessionCtx { user_id: 7u64 });
+            next.run(request).await
+        }
+
+        let app = Router::new()
+            .route(
+                "/x/{id}",
+                post(
+                    |SessionCtx { user_id }: SessionCtx<u64>,
+                     PathVarser(param): PathVarser<IdParam>,
+                     Varser(body): Varser<Payload>| async move {
+                        axum::Json(format!("{user_id}:{}:{}", param.id, body.name))
+                    },
+                ),
+            )
+            .layer(middleware::from_fn(authenticate));
+
+        let (status, body) = drive(app, json_post("/x/42", r#"{"name":"ada"}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::Value::String("7:42:ada".to_string()));
+    }
+
+    /// Rejection semantics survive composition: an unparseable path parameter
+    /// is still the catalog's 400 `BadRequest`, and the body is never reached.
+    #[tokio::test]
+    async fn invalid_path_parameter_in_a_composed_handler_is_400() {
+        let app = Router::new().route(
+            "/x/{id}",
+            post(
+                |PathVarser(param): PathVarser<IdParam>, Varser(body): Varser<Payload>| async move {
+                    axum::Json(format!("{}:{}", param.id, body.name))
+                },
+            ),
+        );
+
+        let (status, body) = drive(app, json_post("/x/abc", r#"{"name":"ada"}"#)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], 400);
+        assert_eq!(body["message"], texts().bad_request.as_ref());
+        assert!(
+            body.get("errors").is_none(),
+            "parse failures carry no errors: {body}"
+        );
+    }
+}
+
+/// The garde mirror of the position contract.
+#[cfg(all(test, feature = "validation-garde"))]
+mod garde_composition_tests {
+    use super::{GardePathVarser, GardeQueryVarser, GardeVarser, Initializer};
+    use axum::Router;
+    use axum::body::Body;
+    use axum::extract::Request;
+    use axum::http::{StatusCode, header};
+    use axum::routing::post;
+    use http_body_util::BodyExt;
+    use serde::Deserialize;
+    use tower::ServiceExt;
+
+    async fn drive(app: Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let response = app.oneshot(req).await.expect("request succeeds");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    #[derive(Debug, Deserialize, garde::Validate)]
+    struct IdParam {
+        #[garde(range(min = 1))]
+        id: u32,
+    }
+
+    impl Initializer for IdParam {}
+
+    #[derive(Debug, Deserialize, garde::Validate)]
+    struct Payload {
+        #[garde(length(min = 3))]
+        name: String,
+    }
+
+    impl Initializer for Payload {}
+
+    #[derive(Debug, Deserialize, garde::Validate)]
+    struct Search {
+        #[garde(length(min = 1))]
+        q: String,
+    }
+
+    impl Initializer for Search {}
+
+    fn json_post(uri: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request builds")
+    }
+
+    /// `(GardePathVarser, GardeVarser)`.
+    #[tokio::test]
+    async fn garde_path_extractor_precedes_the_body_extractor() {
+        let app = Router::new().route(
+            "/x/{id}",
+            post(
+                |GardePathVarser(param): GardePathVarser<IdParam>,
+                 GardeVarser(body): GardeVarser<Payload>| async move {
+                    axum::Json(format!("{}:{}", param.id, body.name))
+                },
+            ),
+        );
+
+        let (status, body) = drive(app, json_post("/x/42", r#"{"name":"ada"}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::Value::String("42:ada".to_string()));
+    }
+
+    /// `(GardeQueryVarser, GardeVarser)`.
+    #[tokio::test]
+    async fn garde_query_extractor_precedes_the_body_extractor() {
+        let app = Router::new().route(
+            "/search",
+            post(
+                |GardeQueryVarser(search): GardeQueryVarser<Search>,
+                 GardeVarser(body): GardeVarser<Payload>| async move {
+                    axum::Json(format!("{}:{}", search.q, body.name))
+                },
+            ),
+        );
+
+        let (status, body) = drive(app, json_post("/search?q=hello", r#"{"name":"ada"}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::Value::String("hello:ada".to_string()));
     }
 }

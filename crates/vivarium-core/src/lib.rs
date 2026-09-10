@@ -37,8 +37,18 @@ use serde::{Deserialize, Serialize};
 #[serde(from = "PaginationArgs")]
 pub struct Pagination {
     /// 1-based page number, normalized to `1..=MAX_PAGE`.
+    ///
+    /// Advertised to OpenAPI as an optional parameter defaulting to `1`,
+    /// matching the hand-written `IntoParams` impl.
+    #[cfg_attr(feature = "utoipa", schema(default = 1, required = false))]
     pub page: u32,
     /// Number of rows per page, normalized to `1..=MAX_PER_PAGE`.
+    ///
+    /// Advertised to OpenAPI as an optional parameter defaulting to
+    /// [`DEFAULT_PER_PAGE`], matching the hand-written `IntoParams` impl.
+    ///
+    /// [`DEFAULT_PER_PAGE`]: Pagination::DEFAULT_PER_PAGE
+    #[cfg_attr(feature = "utoipa", schema(default = 20, required = false))]
     pub per_page: u32,
 }
 
@@ -89,10 +99,24 @@ impl Pagination {
     /// Returns the SQL `(LIMIT, OFFSET)` pair for this page.
     ///
     /// `LIMIT` is `per_page`; `OFFSET` is `(page - 1) * per_page`.
+    ///
+    /// The arithmetic is also defined for values that bypassed [`normalize`]
+    /// through a struct literal: `page == 0` is read as the first page and
+    /// `per_page == 0` as [`DEFAULT_PER_PAGE`]. The offset is computed in
+    /// `u64` and saturates, so no input can overflow or underflow.
+    ///
+    /// [`normalize`]: Pagination::normalize
+    /// [`DEFAULT_PER_PAGE`]: Pagination::DEFAULT_PER_PAGE
     pub fn limit_offset(&self) -> (u64, u64) {
+        let page = self.page.max(1);
+        let per_page = if self.per_page == 0 {
+            Self::DEFAULT_PER_PAGE
+        } else {
+            self.per_page
+        };
         (
-            u64::from(self.per_page),
-            u64::from(self.page - 1) * u64::from(self.per_page),
+            u64::from(per_page),
+            u64::from(page - 1).saturating_mul(u64::from(per_page)),
         )
     }
 }
@@ -108,11 +132,13 @@ impl Default for Pagination {
 
 /// The deserialization shape of [`Pagination`].
 ///
-/// Deserialization goes through [`Pagination::new`] so the normalization
-/// invariant holds for every `Pagination` in existence — a wire value such as
-/// `{"page": 0}` would otherwise reach [`Pagination::limit_offset`] with
-/// `page == 0` and underflow. Missing fields take the documented defaults,
-/// matching the `IntoParams` schema.
+/// Deserialization goes through [`Pagination::new`], so every value built by
+/// `new`, [`Default`], or deserialization satisfies the normalization
+/// invariant — a wire value such as `{"page": 0}` would otherwise reach
+/// [`Pagination::limit_offset`] with `page == 0`. A struct literal can bypass
+/// that invariant, which is why `limit_offset` also handles unnormalized
+/// values. Missing fields take the documented defaults, matching the
+/// `IntoParams` schema.
 #[derive(Deserialize)]
 #[serde(default)]
 struct PaginationArgs {
@@ -781,6 +807,48 @@ mod tests {
     }
 
     #[test]
+    fn pagination_limit_offset_handles_unnormalized_values() {
+        // The fields are public, so a struct literal can bypass the
+        // normalization `new`/`Deserialize` perform. `page == 0` must not
+        // underflow and `per_page == 0` must not yield a `LIMIT` of 0.
+        assert_eq!(
+            Pagination {
+                page: 0,
+                per_page: 0
+            }
+            .limit_offset(),
+            (20, 0)
+        );
+        assert_eq!(
+            Pagination {
+                page: 0,
+                per_page: 20
+            }
+            .limit_offset(),
+            (20, 0)
+        );
+    }
+
+    #[test]
+    fn pagination_limit_offset_does_not_overflow() {
+        let extreme_page = Pagination {
+            page: u32::MAX,
+            per_page: 20,
+        };
+        assert_eq!(
+            extreme_page.limit_offset(),
+            (20, (u32::MAX - 1) as u64 * 20)
+        );
+
+        let extreme_everything = Pagination {
+            page: u32::MAX,
+            per_page: u32::MAX,
+        };
+        let offset = (u32::MAX - 1) as u64 * u32::MAX as u64;
+        assert_eq!(extreme_everything.limit_offset(), (u32::MAX as u64, offset));
+    }
+
+    #[test]
     fn page_counts_pages_rounding_up() {
         let page: Page<()> = Page {
             items: vec![],
@@ -916,7 +984,8 @@ mod tests {
 
         // utoipa composes instantiation names as `<Base>_<Child>` at the
         // reference site, so the base name must stay free of type arguments.
-        // The composed keys themselves are pinned by the web golden test.
+        // The composed keys themselves — the `ApiResponse_*` names, including
+        // the nested `Page` instantiation — are pinned by the web golden test.
         assert_eq!(Pagination::name(), "Pagination");
         assert_eq!(Page::<u32>::name(), "Page");
         assert_eq!(Page::<String>::name(), "Page");
@@ -933,5 +1002,32 @@ mod tests {
             .map(|parameter| parameter.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["page", "per_page"]);
+    }
+
+    #[cfg(feature = "utoipa")]
+    #[test]
+    fn pagination_schema_matches_into_params() {
+        use utoipa::{IntoParams, PartialSchema};
+
+        // The derived schema must describe both parameters the way the
+        // hand-written `IntoParams` impl below does: optional, with the same
+        // defaults.
+        let schema = Pagination::schema();
+        let derived = serde_json::to_value(schema).expect("schema serializes");
+        assert!(derived.get("required").is_none());
+
+        let properties = &derived["properties"];
+        assert_eq!(properties["page"]["default"], serde_json::json!(1));
+        let default_per_page = serde_json::json!(Pagination::DEFAULT_PER_PAGE);
+        assert_eq!(properties["per_page"]["default"], default_per_page);
+
+        let parameters = Pagination::into_params(|| None);
+        let params = serde_json::to_value(parameters).expect("parameters serialize");
+        for (index, name) in ["page", "per_page"].into_iter().enumerate() {
+            assert_eq!(params[index]["name"], serde_json::json!(name));
+            assert_eq!(params[index]["required"], serde_json::json!(false));
+            let advertised = &params[index]["schema"]["default"];
+            assert_eq!(advertised, &properties[name]["default"]);
+        }
     }
 }

@@ -7,6 +7,9 @@ single-primary-key structs.
 The derive is re-exported by both `vivarium-rs` and `vivarium-db`, so you
 normally do not depend on this crate directly.
 
+> The code snippets in this file are illustrative and are not compiled by CI;
+> the compiled examples live in the root README.
+
 ## Attributes
 
 - `#[entity(table = "name")]` (struct) — table name; defaults to the

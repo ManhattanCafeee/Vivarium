@@ -1,8 +1,14 @@
 //! Transaction helper: [`with_transaction`].
 //!
 //! The CRUD and query helpers take `impl Executor`, so the connection behind
-//! the transaction works with all of them — this module only supplies the
-//! "begin, run, commit or roll back" scaffold.
+//! the transaction works with all of them but one: [`Query::paginate`] needs
+//! an executor that is `Copy` (it runs two queries), which the connection
+//! inside a transaction is not. Inside a transaction, count first and page
+//! with [`Query::paginate_with_total`]. This module only supplies the "begin,
+//! run, commit or roll back" scaffold.
+//!
+//! [`Query::paginate`]: crate::Query::paginate
+//! [`Query::paginate_with_total`]: crate::Query::paginate_with_total
 
 use std::ops::AsyncFnOnce;
 

@@ -5,6 +5,9 @@ generic CRUD for `Entity` types, a chainable query builder with typed filters,
 compile-time-checked bind values, partial-column updates, transactions, and
 pagination.
 
+> The code snippets in this file are illustrative and are not compiled by CI;
+> the compiled examples live in the root README.
+
 ## Features
 
 | Feature | Driver |

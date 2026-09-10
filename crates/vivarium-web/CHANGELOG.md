@@ -68,6 +68,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Texts` gained `invalid_refresh` (the message of a rejected refresh token);
   code that builds the struct literally must add the field, everything else
   keeps working through `..Texts::default()`.
+- A `FieldViolation` omits the `message` key when the failed rule declared no
+  message; the old implementation serialized `validator` directly and emitted
+  `"message": null` instead.
+- A `FieldViolation`'s `params` no longer echo the submitted value
+  (`params.value`), which may hold a password or a token; the key is omitted.
 
 ### Added
 

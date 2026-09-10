@@ -182,6 +182,13 @@ where
     /// and offset clauses (`<projection>` is `*` unless
     /// [`select`](Query::select) narrowed it).
     ///
+    /// It reflects only the query's own [`limit`](Query::limit) and
+    /// [`offset`](Query::offset). [`first`](Query::first) ignores both — its
+    /// SQL is the `ORDER BY` tail plus `LIMIT 1`, i.e. `SELECT … FROM …
+    /// ORDER BY … LIMIT 1`, never the clauses shown here — and
+    /// [`paginate`](Query::paginate) replaces both with the pagination's
+    /// values.
+    ///
     /// Useful for debugging and for unit tests that need no database.
     pub fn sql(&self) -> String {
         DB::render_sql(&self.select_prefix(), &self.steps, &self.tail())
@@ -267,6 +274,12 @@ where
     ///
     /// The executor must be `Copy` because two queries run against it; pass a
     /// reference (e.g. `&pool`).
+    ///
+    /// A transaction offers no `Copy` executor, so inside one take the total
+    /// first with [`count`](Query::count) (or reuse a known one) and page with
+    /// [`paginate_with_total`](Query::paginate_with_total) instead. Hand the
+    /// transaction connection over as `&mut **tx`, the convention of
+    /// [`with_transaction`](crate::with_transaction).
     pub async fn paginate<'e, E>(&self, mut pagination: Pagination, db: E) -> Result<Page<T>, Error>
     where
         E: Executor<'e, Database = DB> + Copy + 'e,

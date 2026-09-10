@@ -3159,7 +3159,6 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
- "tracing",
  "uuid",
  "vivarium-core",
  "vivarium-macros",
@@ -3230,6 +3229,7 @@ dependencies = [
  "utoipa-scalar",
  "utoipa-swagger-ui",
  "validator",
+ "vivarium-core",
 ]
 
 [[package]]

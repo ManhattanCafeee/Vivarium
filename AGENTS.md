@@ -44,10 +44,11 @@ cargo doc --no-deps --all-features
 SQLX_OFFLINE=true cargo check --workspace --all-features
 ```
 
-- Postgres tests self-skip without `DATABASE_URL`; to run them: `DATABASE_URL=postgres://postgres:postgres@localhost:5432/vivarium cargo test --workspace --all-features` (CI: postgres:16 service)
+- Postgres tests self-skip without `DATABASE_URL`; to run them: `DATABASE_URL=postgres://postgres:postgres@localhost:5432/vivarium cargo test --workspace --all-features` (CI: postgres:16 service, plus `VIVARIUM_REQUIRE_POSTGRES=1` — see below)
 - MSRV gate: `cargo +1.94.0 check --workspace --all-features` (CI matrix runs stable + 1.94.0)
-- Path dependency versions must equal the workspace crate versions (`vivarium-rs` requires `vivarium-core = "0.1.2"`, `vivarium-db = "0.2.1"`, …); CI checks this with `cargo metadata --no-deps` + `jq`, because a stale requirement only fails at `cargo publish` time
+- Each crate's version lives in its own `Cargo.toml` (nothing is inherited from `[workspace.package]`), and every internal `path` dependency's `version` requirement must equal the version of the crate it points at; CI checks this with `cargo metadata --no-deps` + `jq`, because a stale requirement only fails at `cargo publish` time
 - MySQL tests self-skip without `MYSQL_DATABASE_URL` (CI: mysql:8.4 service); PostgreSQL uses `DATABASE_URL`
+- Both self-skips stay local-only: CI sets `VIVARIUM_REQUIRE_POSTGRES=1` / `VIVARIUM_REQUIRE_MYSQL=1`, which makes the tests fail hard when their URL is missing instead of returning early (a deleted service or a typo in the env then reddens the job rather than passing with zero coverage). Leave the flags unset locally to keep the self-skip
 - Regenerate trybuild snapshots: `TRYBUILD=overwrite cargo test -p vivarium-macros --test ui`
 - `cargo test -p vivarium-db` without features compiles **zero** integration tests (all driver-gated; the sqlx-dependent doctests are `#[cfg]`-gated so the run still succeeds); use `--features sqlite,postgres,mysql`
 
@@ -67,7 +68,7 @@ SQLX_OFFLINE=true cargo check --workspace --all-features
 
 ## Important Files
 
-- `Cargo.toml` — workspace manifest (`workspace.package`; note crate versions are NOT inherited and are not uniform: core 0.1.2, macros 0.1.2, db 0.2.1, web 0.2.1, config 0.1.1, rs 0.2.1 — every internal `path` dependency's `version` requirement must equal the crate it points at, which CI checks)
+- `Cargo.toml` — workspace manifest (`workspace.package`; crate versions are NOT inherited — each one is declared in its own manifest — and every internal `path` dependency's `version` requirement must equal the version of the crate it points at, which CI checks)
 - `crates/vivarium-db/src/lib.rs` — re-export surface (`encode_error`/`key_error` live here)
 - `crates/vivarium-db/src/{query,crud,driver}.rs` — query builder, CRUD, driver glue
 - `crates/vivarium-db/src/{predicate,update,transaction}.rs` — filter AST, partial updates, transactions
@@ -76,7 +77,7 @@ SQLX_OFFLINE=true cargo check --workspace --all-features
 - `crates/vivarium-web/src/openapi.rs` — utoipa security schemes, `info`, `mount` (feature `utoipa`/`utoipa-ui`)
 - `crates/vivarium-config/src/lib.rs` — single-module crate; reload/watch semantics
 - `crates/vivarium-rs/src/lib.rs` — facade re-export matrix + feature definitions
-- `.github/workflows/ci.yml` — full gate (fmt, clippy `-D warnings`, test, single-feature checks, doc, `SQLX_OFFLINE=true` check; matrix stable + 1.94.0; postgres:16 + mysql:8.4 services)
+- `.github/workflows/ci.yml` — full gate (fmt, clippy `-D warnings`, test, single-feature checks, README-doctest count assertion, doc, `SQLX_OFFLINE=true` check; matrix stable + 1.94.0; postgres:16 + mysql:8.4 services)
 - `README.md` — quick start; `docs/go-rust-mapping.md` — Go→Rust porting map (non-ports rationale)
 - `crates/vivarium-db/examples/migrations/0001_create_users.sql` (+ `.down.sql`) — sample migration layout, not compiled into the library
 
@@ -90,7 +91,7 @@ SQLX_OFFLINE=true cargo check --workspace --all-features
 
 ## Testing & QA
 
-- **Command:** `cargo test --workspace --all-features` (works without database servers — `pg.rs`/`mysql.rs` self-skip via `DATABASE_URL`/`MYSQL_DATABASE_URL` + eprintln + return). Doctests run automatically; crate-level examples are `no_run` (compile-only)
+- **Command:** `cargo test --workspace --all-features` (works without database servers — `pg.rs`/`mysql.rs` self-skip via `DATABASE_URL`/`MYSQL_DATABASE_URL` + eprintln + return, unless `VIVARIUM_REQUIRE_POSTGRES`/`VIVARIUM_REQUIRE_MYSQL` is set). Doctests run automatically; crate-level examples are `no_run` (compile-only). CI additionally runs `cargo test --doc -p vivarium-rs --all-features` and asserts the output contains `ReadmeDoctests`, so a missing `web`/`config`/`db-sqlite` feature cannot silently drop the root README's snippets from the suite
 - **Layout:** integration tests in `crates/*/tests/` (db, macros, rs — including `vivarium-rs/tests/paths.rs`, which pins the facade's re-export surface by compiling it — plus web's `openapi.rs`/`texts.rs`) + inline `#[cfg(test)]` modules (every web module, config, core, macros). No shared test-utils module — self-contained helpers per file (`pool()`, `drive()`, `body_json()`); duplication is accepted
 - **Style to copy:** web handler test = build `Router` + `app.oneshot(req)` (`crates/vivarium-web/src/cache.rs` is the shortest); db test = `#[derive(sqlx::FromRow, Entity)]` + in-memory pool + `sqlx::migrate!("./examples/migrations")` (`crates/vivarium-db/tests/crud.rs`); end-to-end acceptance template = `crates/vivarium-rs/tests/quickstart.rs`; macro behavior = `crates/vivarium-macros/tests/derive.rs`; config reload = `tempfile` + `#[tokio::test(flavor = "multi_thread")]`
 - **Coverage:** none — no tarpaulin/llvm-cov/codecov config. The gate is CI: fmt + clippy `-D warnings` + full test suite on stable and 1.94.0

@@ -32,6 +32,9 @@ impl vivarium_db::Column for UserCol {
 #[tokio::test]
 async fn postgres_crud_round_trip() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
+        if std::env::var("VIVARIUM_REQUIRE_POSTGRES").is_ok() {
+            panic!("DATABASE_URL is required when VIVARIUM_REQUIRE_POSTGRES is set");
+        }
         eprintln!("skipping: DATABASE_URL not set");
         return;
     };

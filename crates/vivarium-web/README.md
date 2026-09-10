@@ -6,6 +6,9 @@ initialize + validate in one step, JWT + cookie-session authentication,
 refresh-token rotation, RBAC permission wildcards, password hashing, a
 `Cache-Control` layer, and OpenAPI helpers.
 
+> The code snippets in this file are illustrative and are not compiled by CI;
+> the compiled examples live in the root README.
+
 ## Quick start
 
 ```rust,ignore
