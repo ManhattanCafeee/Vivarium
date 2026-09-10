@@ -22,10 +22,12 @@
 //! # use vivarium_web::texts::texts;
 //! ```
 //!
-//! Messages supplied explicitly by a call site are never overridden by the
-//! catalog: `ApiError::not_found("…")`, the `permission denied` text of
+//! Messages a call site supplies itself are never overridden by the catalog: a
+//! handler's `ApiError::not_found("no such user")` is exactly what the client
+//! sees. The library's own refusals do come from here — the extractor
+//! rejections, the session and JWT 401s, the 403 of
 //! [`PermissionSet::require`](crate::authz::PermissionSet::require), and the
-//! refresh-token refusal keep whatever their call site passes.
+//! refresh-token 401 ([`invalid_refresh`](Texts::invalid_refresh)).
 
 use std::borrow::Cow;
 use std::sync::OnceLock;
@@ -54,9 +56,11 @@ pub struct Texts {
     pub not_found: Cow<'static, str>,
     /// Message of a [`ErrorKind::Conflict`](crate::ErrorKind::Conflict) error.
     pub conflict: Cow<'static, str>,
-    /// Message of a
-    /// [`ErrorKind::TooManyRequests`](crate::ErrorKind::TooManyRequests) error.
+    /// Message of a [`ErrorKind::TooManyRequests`](crate::ErrorKind::TooManyRequests) error.
     pub too_many_requests: Cow<'static, str>,
+    /// Message of the 401 a rejected refresh token produces: unknown, expired,
+    /// already consumed, or raced by a concurrent rotation.
+    pub invalid_refresh: Cow<'static, str>,
     /// Message of a [`ErrorKind::Internal`](crate::ErrorKind::Internal) error
     /// that carries no further detail.
     pub internal: Cow<'static, str>,
@@ -85,6 +89,7 @@ impl Default for Texts {
             not_found: Cow::Borrowed("not found"),
             conflict: Cow::Borrowed("conflict"),
             too_many_requests: Cow::Borrowed("too many requests"),
+            invalid_refresh: Cow::Borrowed("invalid or expired refresh token"),
             internal: Cow::Borrowed("internal error"),
             database: Cow::Borrowed("database error"),
             echo_details: false,

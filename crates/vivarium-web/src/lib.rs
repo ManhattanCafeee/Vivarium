@@ -50,6 +50,7 @@
 //! | `utoipa` | no | `ToSchema` derives, `openapi` schemes and `info` |
 //! | `utoipa-ui` | no | `openapi::mount` (Scalar + Swagger UI) |
 //! | `sqlx` | no | `From<sqlx::Error> for ApiError`, `ApiError::conflict_from_db` |
+//! | `telemetry` | no | `serve::telemetry::init` (stdout + JSON log files) |
 //!
 //! [`vivarium-rs`]: https://docs.rs/vivarium-rs
 
@@ -61,6 +62,7 @@ pub mod error;
 pub mod jwt;
 pub mod password;
 pub mod response;
+pub mod secrets;
 pub mod serve;
 pub mod session;
 pub mod texts;
@@ -72,14 +74,24 @@ pub mod varser;
 pub mod openapi;
 
 pub use authz::{PermissionSet, perms_match};
+pub use cache::CacheControl;
 pub use error::{ApiError, ErrorKind, Result, debug_mode, install_debug_mode};
-pub use password::{hash, verify, verify_login};
+pub use jwt::{JwtConfig, JwtVerifier, KeyRing};
+pub use password::{
+    Argon2Params, VerifyOutcome, hash, hash_with, needs_rehash, verify, verify_and_upgrade,
+    verify_login,
+};
 pub use response::ApiResponse;
+pub use secrets::hash_token;
+pub use serve::{serve_with_shutdown, shutdown_signal};
 pub use session::{
-    OptionalSessionCtx, SessionAuth, SessionCtx, SessionRecord, SessionStore, session_layer,
+    CookieOptions, OptionalSessionCtx, SameSite, SessionAuth, SessionCtx, SessionId, SessionRecord,
+    SessionStore, session_layer, should_extend,
 };
 pub use texts::{Texts, install_texts, texts};
-pub use token::{RefreshTokenManager, RefreshTokenRecord, RefreshTokenStore, TokenPair};
+pub use token::{
+    AccessClaims, Claims, RefreshTokenManager, RefreshTokenRecord, RefreshTokenStore, TokenPair,
+};
 pub use validation::{FieldViolation, ValidationErrors};
 pub use varser::{Initializer, get_authorization};
 

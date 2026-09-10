@@ -195,29 +195,38 @@ let claims: Claims = decode_token(&token, SECRET)?;   // HS256 fixed; RS256 reje
 Or as middleware: `.route_layer(vivarium_rs::jwt::jwt_auth::<Claims>(SECRET.into()))`
 puts the decoded claims into request extensions.
 
-### 5. Sessions with sliding renewal
+### 5. Sessions with a sliding TTL and an absolute cap
 
 ```rust,no_run
 use std::time::Duration;
 use axum::{Router, routing::get};
-use vivarium_rs::{SessionAuth, SessionCtx, session_layer};
+use vivarium_rs::{CookieOptions, SessionAuth, SessionCtx, session_layer};
 
-let auth = SessionAuth::new(my_store, "sid", Duration::from_hours(24)); // SessionStore is app-owned
-let app = Router::new().route("/me", get(|SessionCtx { user_id }: SessionCtx| user_id.to_string()))
+let auth = SessionAuth::new(
+    my_store,                                    // SessionStore is app-owned
+    CookieOptions::new("sid"),                   // Secure; HttpOnly; SameSite=Lax; Path=/
+    Duration::from_hours(24),                    // slides while the session is used
+    Some(Duration::from_hours(24 * 7)),          // absolute cap, never extended past
+);
+let app = Router::new().route("/me", get(|SessionCtx { user_id }: SessionCtx<u64>| user_id.to_string()))
     .layer(session_layer(auth));
 ```
 
-The middleware looks up the session (deleting expired ones), refreshes the
-cookie after half the TTL is used, and never rejects — the `SessionCtx`
-extractor answers 401 (`OptionalSessionCtx` for optional-login routes).
+The middleware looks up the session by its SHA-256 digest (deleting dead
+rows), refreshes the cookie after half the TTL is used, and never rejects —
+the `SessionCtx` extractor answers 401 (`OptionalSessionCtx` for
+optional-login routes, `SessionId` when the handler needs to log out).
 Logins call `auth.start(user_id)` and set the cookie via
-`auth.set_cookie_value(id)`.
+`auth.set_cookie_value(&id)`; only the digest reaches the store, so a leaked
+session table hands out no live sessions.
 
 Single-use refresh-token rotation and Argon2 password hashing ride along:
-`RefreshTokenManager::new(store, secret, access_ttl, refresh_ttl)`
-(`rotate` consumes the token; a replayed one fails the delete 401) and
-`verify_login(password, user_hash.as_deref())`, which keeps the
-unknown-user path constant-time against username enumeration.
+`RefreshTokenManager::new(store, secret, access_ttl, refresh_ttl)` — `rotate`
+consumes the token, rebuilds the claims from the stored user id, and overwrites
+`sub`/`exp`/`iat`, so a replayed or stolen token cannot mint one for someone
+else — and `verify_and_upgrade(password, user_hash.as_deref(), Argon2Params::default())`,
+which keeps the unknown-user path constant-time against username enumeration
+and reports when a stored hash should be upgraded.
 
 ### 6. Hot-reloadable config
 

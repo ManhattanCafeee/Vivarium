@@ -76,8 +76,10 @@ jobs:
           cargo check -p vivarium-web --no-default-features --features sqlx
           cargo check -p vivarium-web --no-default-features --features utoipa
           cargo check -p vivarium-web --no-default-features --features utoipa-ui
+          cargo check -p vivarium-web --no-default-features --features telemetry
           cargo check -p vivarium-rs --no-default-features
           cargo check -p vivarium-rs --no-default-features --features db-mysql
+          cargo check -p vivarium-rs --no-default-features --features web,telemetry
       - name: Doc
         run: cargo doc --no-deps --all-features
       - name: Offline query check

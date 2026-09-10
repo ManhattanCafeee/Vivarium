@@ -1,156 +1,286 @@
-//! Server-side cookie sessions with sliding renewal.
+//! Server-side cookie sessions with a sliding TTL and an absolute cap.
 //!
-//! A session is an opaque, randomly generated id stored in an
-//! `HttpOnly; SameSite=Lax; Path=/` cookie. The server keeps the trust
-//! boundary: [`SessionStore`] persists a row per session (`session_id`
-//! unique, `user_id`, `expires_at`, `last_activity` — table is
-//! app-owned), and [`SessionCtx`] only exists when the middleware found a
-//! live session.
+//! A session is an opaque id minted from the operating system CSPRNG, carried
+//! in a cookie and stored server-side. Two properties shape the API:
+//!
+//! - **The store only sees digests.** The cookie carries the raw id; every
+//!   [`SessionStore`] call receives its SHA-256 [digest](SessionId::digest)
+//!   instead. A leaked `sessions` table (a dump, a replica, a backup) therefore
+//!   hands out no live sessions.
+//! - **Two lifetimes.** `ttl` slides on activity; `absolute_ttl` caps the total
+//!   life of a session — past that deadline the session dies regardless of
+//!   activity, and renewal never extends beyond it.
 //!
 //! Layering, matching the reference implementation:
-//! - [`session_layer`] middleware resolves the cookie, checks expiry
-//!   (deleting expired sessions), and performs sliding renewal after the
-//!   response: once a session has lived past half its TTL, the TTL is
-//!   extended and the cookie's `Max-Age` is refreshed in the response.
-//!   The middleware never rejects a request — authentication decisions are
-//!   the [`SessionCtx`] extractor's job.
-//! - [`SessionAuth::start`]/[`SessionAuth::end`] create sessions at login
-//!   and delete them at logout; [`SessionAuth::set_cookie_value`] produces
-//!   the `Set-Cookie` header value for the login response.
+//! - [`session_layer`] resolves the cookie, validates the session against the
+//!   store (deleting dead rows), stashes [`SessionCtx`] and [`SessionId`] in
+//!   the request extensions and, after the handler, renews the session once it
+//!   has lived past half its TTL. The middleware never rejects a request —
+//!   authentication decisions are the [`SessionCtx`] extractor's job.
+//! - [`SessionAuth::start`] mints a session at login, [`SessionAuth::end`]
+//!   deletes one at logout, and [`SessionAuth::set_cookie_value`] produces the
+//!   `Set-Cookie` header value for the login response.
+//!
+//! `Secure`, `HttpOnly`, `SameSite=Lax` and `Path=/` are the defaults
+//! ([`CookieOptions::new`]); local development over plain HTTP opts out
+//! explicitly with [`CookieOptions::insecure`].
 //!
 //! ```no_run
 //! use axum::{Router, routing::get};
+//! use chrono::{DateTime, Utc};
 //! use parking_lot::Mutex;
 //! use std::{collections::HashMap, sync::Arc, time::Duration};
-//! use vivarium_web::{SessionAuth, SessionCtx, SessionRecord, SessionStore, session_layer};
+//! use vivarium_web::session::{
+//!     CookieOptions, SessionAuth, SessionCtx, SessionRecord, SessionStore, session_layer,
+//! };
 //!
 //! #[derive(Clone, Default)]
-//! struct MyStore(Arc<Mutex<HashMap<String, SessionRecord>>>);
+//! struct MyStore(Arc<Mutex<HashMap<String, SessionRecord<u64>>>>);
 //!
 //! impl SessionStore for MyStore {
-//!     async fn create(&self, session_id: &str, user_id: i64, expires_at: std::time::SystemTime,
-//!         last_activity: std::time::SystemTime) -> Result<(), vivarium_web::ApiError> {
-//!         self.0.lock().insert(session_id.to_string(),
-//!             SessionRecord { user_id, expires_at, last_activity });
+//!     type UserId = u64;
+//!
+//!     async fn create(&self, id: &str, user: u64, created_at: DateTime<Utc>,
+//!         expires_at: DateTime<Utc>, last_activity: DateTime<Utc>) -> Result<(), vivarium_web::ApiError> {
+//!         self.0.lock().insert(id.to_string(), SessionRecord {
+//!             user_id: user, created_at, expires_at, last_activity,
+//!         });
 //!         Ok(())
 //!     }
-//!     async fn find(&self, session_id: &str)
-//!         -> Result<Option<SessionRecord>, vivarium_web::ApiError> {
-//!         Ok(self.0.lock().get(session_id).cloned())
+//!     async fn find(&self, id: &str) -> Result<Option<SessionRecord<u64>>, vivarium_web::ApiError> {
+//!         Ok(self.0.lock().get(id).cloned())
 //!     }
-//!     async fn touch(&self, session_id: &str, expires_at: std::time::SystemTime,
-//!         last_activity: std::time::SystemTime) -> Result<(), vivarium_web::ApiError> {
-//!         if let Some(record) = self.0.lock().get_mut(session_id) {
+//!     async fn touch(&self, id: &str, expires_at: DateTime<Utc>, last_activity: DateTime<Utc>)
+//!         -> Result<(), vivarium_web::ApiError> {
+//!         if let Some(record) = self.0.lock().get_mut(id) {
 //!             record.expires_at = expires_at;
 //!             record.last_activity = last_activity;
 //!         }
 //!         Ok(())
 //!     }
-//!     async fn remove(&self, session_id: &str) -> Result<(), vivarium_web::ApiError> {
-//!         self.0.lock().remove(session_id);
-//!         Ok(())
+//!     async fn remove(&self, id: &str) -> Result<bool, vivarium_web::ApiError> {
+//!         Ok(self.0.lock().remove(id).is_some())
 //!     }
-//!     async fn remove_by_user(&self, user_id: i64) -> Result<(), vivarium_web::ApiError> {
-//!         self.0.lock().retain(|_, r| r.user_id != user_id);
-//!         Ok(())
+//!     async fn remove_by_user(&self, user: u64) -> Result<u64, vivarium_web::ApiError> {
+//!         let mut store = self.0.lock();
+//!         let before = store.len() as u64;
+//!         store.retain(|_, record| record.user_id != user);
+//!         Ok(before - store.len() as u64)
 //!     }
 //! }
 //!
-//! async fn me(SessionCtx { user_id }: SessionCtx) -> String { user_id.to_string() }
+//! async fn me(SessionCtx { user_id }: SessionCtx<u64>) -> String { user_id.to_string() }
 //!
 //! # async fn example() {
-//! let auth = SessionAuth::new(MyStore::default(), "sid", Duration::from_secs(3600));
-//! let app: Router = Router::new()
-//!     .route("/me", get(me))
-//!     .layer(session_layer(auth));
+//! let auth = SessionAuth::new(
+//!     MyStore::default(),
+//!     CookieOptions::new("sid"),
+//!     Duration::from_secs(3600),
+//!     Some(Duration::from_secs(12 * 3600)),
+//! );
+//! let app: Router = Router::new().route("/me", get(me)).layer(session_layer(auth));
 //! # }
 //! ```
 
+use std::future::Future;
 use std::pin::Pin;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use axum::extract::{FromRequestParts, Request, State};
-use axum::http::header;
-use axum::http::{HeaderMap, HeaderValue};
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::middleware::{self, FromFnLayer, Next};
 use axum::response::Response;
-use cookie::{Cookie, SameSite};
-use uuid::Uuid;
+use chrono::{DateTime, TimeDelta, Utc};
+use cookie::Cookie;
+
+pub use cookie::SameSite;
 
 use crate::error::ApiError;
+use crate::secrets::{generate_token, hash_token};
 use crate::texts::texts;
 
-/// A live session as stored server-side.
+/// The cookie carrying a session id.
+///
+/// The defaults are the safe ones — `Path=/`, `Secure`, `HttpOnly`,
+/// `SameSite=Lax` — so a deployment only has to name the cookie. Fields are
+/// public for the rest: set `domain` for a shared parent domain, or `path` to
+/// confine the session to a subtree.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionRecord {
-    /// The authenticated user's id.
-    pub user_id: i64,
-    /// The instant this session expires.
-    pub expires_at: SystemTime,
-    /// The instant the session was last active; drives sliding renewal.
-    pub last_activity: SystemTime,
+pub struct CookieOptions {
+    /// The cookie name (e.g. `sid`).
+    pub name: String,
+    /// The `Path` attribute.
+    pub path: String,
+    /// Whether the `Secure` attribute is set.
+    pub secure: bool,
+    /// Whether the `HttpOnly` attribute is set.
+    pub http_only: bool,
+    /// The `SameSite` attribute.
+    pub same_site: SameSite,
+    /// The `Domain` attribute, when the cookie is shared across subdomains.
+    pub domain: Option<String>,
+}
+
+impl CookieOptions {
+    /// Options for the cookie `name`, with the safe defaults.
+    ///
+    /// `path` is `/`, `secure` and `http_only` are on, and `same_site` is
+    /// [`SameSite::Lax`].
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            path: "/".to_string(),
+            secure: true,
+            http_only: true,
+            same_site: SameSite::Lax,
+            domain: None,
+        }
+    }
+
+    /// Drops `Secure`, for local development over plain HTTP.
+    ///
+    /// This is an explicit opt-out: a browser discards a `Secure` cookie sent
+    /// over `http://`, so a development server needs this to be usable. Never
+    /// ship it.
+    #[must_use]
+    pub fn insecure(mut self) -> Self {
+        self.secure = false;
+        self
+    }
+}
+
+/// The id of a session, as it travels to the client.
+///
+/// 32 bytes from the operating system CSPRNG, base64url without padding. The
+/// cookie carries this string; the store carries its
+/// [`digest`](SessionId::digest) — the library hashes before every store call,
+/// so the raw value never reaches storage or logs.
+///
+/// The extractor of the same name hands the authenticated session's id to a
+/// handler, which is what logout needs:
+///
+/// ```
+/// # use vivarium_web::session::SessionId;
+/// let id = SessionId("8Qm…".to_string());
+/// assert_eq!(id.digest().len(), 64);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionId(pub String);
+
+impl SessionId {
+    /// The SHA-256 digest of this id, as stored and looked up.
+    ///
+    /// Calls [`hash_token`]; stores are expected to persist
+    /// and query by this value, never by the raw id.
+    pub fn digest(&self) -> String {
+        hash_token(&self.0)
+    }
+
+    /// The raw id, as carried in the cookie.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Mints a fresh id from the operating system CSPRNG.
+    fn generate() -> Self {
+        Self(generate_token())
+    }
+}
+
+/// A stored session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecord<U = i64> {
+    /// The user this session was minted for.
+    pub user_id: U,
+    /// When the session was minted; the base of `absolute_ttl`.
+    pub created_at: DateTime<Utc>,
+    /// When the session currently expires (extended while it stays active).
+    pub expires_at: DateTime<Utc>,
+    /// The last request that used the session; drives the renewal threshold.
+    pub last_activity: DateTime<Utc>,
 }
 
 /// Storage back-end for sessions.
 ///
 /// Implement against your own schema: the recommended table is
-/// `sessions(session_id UNIQUE, user_id, expires_at, last_activity)`
-/// (adapt the time columns to your driver — epoch seconds is the portable
-/// choice). Map storage failures to [`ApiError::internal`] or
-/// [`ApiError::database`]; the middleware never exposes them to clients.
+/// `sessions(session_id VARCHAR(64) UNIQUE, user_id, created_at, expires_at,
+/// last_activity)`.
+///
+/// Every `id` this trait receives is a SHA-256 digest
+/// ([`SessionId::digest`](SessionId::digest)), never the value the client holds
+/// — store and compare it as-is. Times are UTC; adapt the columns to your
+/// driver (a `DATETIME`/`TIMESTAMP` column, or epoch seconds). `remove` returns
+/// whether a row existed, while `remove_by_user` returns the number of rows
+/// deleted. Map storage failures to [`ApiError::internal`] or
+/// [`ApiError::database`]; the middleware logs them and treats the request as
+/// unauthenticated rather than exposing them to clients.
 pub trait SessionStore: Send + Sync + 'static {
-    /// Persists a new session.
-    fn create<'a>(
-        &'a self,
-        session_id: &'a str,
-        user_id: i64,
-        expires_at: SystemTime,
-        last_activity: SystemTime,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send + 'a;
+    /// The application's user id type.
+    type UserId: Copy + Eq + Send + Sync + 'static;
 
-    /// Returns the session with this id, if it exists.
-    fn find<'a>(
-        &'a self,
-        session_id: &'a str,
-    ) -> impl Future<Output = Result<Option<SessionRecord>, ApiError>> + Send + 'a;
+    /// Persists a new session.
+    fn create(
+        &self,
+        id: &str,
+        user: Self::UserId,
+        created_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+        last_activity: DateTime<Utc>,
+    ) -> impl Future<Output = Result<(), ApiError>> + Send;
+
+    /// Returns the session with this digest, if it exists.
+    fn find(
+        &self,
+        id: &str,
+    ) -> impl Future<Output = Result<Option<SessionRecord<Self::UserId>>, ApiError>> + Send;
 
     /// Updates the expiry and activity timestamps of an existing session.
-    fn touch<'a>(
-        &'a self,
-        session_id: &'a str,
-        expires_at: SystemTime,
-        last_activity: SystemTime,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send + 'a;
+    fn touch(
+        &self,
+        id: &str,
+        expires_at: DateTime<Utc>,
+        last_activity: DateTime<Utc>,
+    ) -> impl Future<Output = Result<(), ApiError>> + Send;
 
-    /// Deletes one session.
-    fn remove<'a>(
-        &'a self,
-        session_id: &'a str,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send + 'a;
+    /// Deletes one session; returns whether a row was deleted.
+    fn remove(&self, id: &str) -> impl Future<Output = Result<bool, ApiError>> + Send;
 
-    /// Deletes every session of a user (logout everywhere).
+    /// Deletes every session of a user (logout everywhere); returns the number
+    /// of rows deleted.
     fn remove_by_user(
         &self,
-        user_id: i64,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send + '_;
+        user: Self::UserId,
+    ) -> impl Future<Output = Result<u64, ApiError>> + Send;
 }
 
 /// Session configuration and the cookie/start/end operations of an
 /// application.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SessionAuth<S> {
     store: S,
-    cookie_name: String,
+    cookie: CookieOptions,
     ttl: Duration,
+    absolute_ttl: Option<Duration>,
 }
 
 impl<S> SessionAuth<S> {
-    /// Constructs session auth with the given store, cookie name and TTL.
-    pub fn new(store: S, cookie_name: impl Into<String>, ttl: Duration) -> Self {
+    /// Constructs session auth from a store, cookie options and lifetimes.
+    ///
+    /// `ttl` is the sliding lifetime renewed while the session stays active;
+    /// `absolute_ttl` optionally caps the total lifetime, after which the
+    /// session dies no matter how active it is (`None` keeps it renewable
+    /// forever).
+    pub fn new(
+        store: S,
+        cookie: CookieOptions,
+        ttl: Duration,
+        absolute_ttl: Option<Duration>,
+    ) -> Self {
         Self {
             store,
-            cookie_name: cookie_name.into(),
+            cookie,
             ttl,
+            absolute_ttl,
         }
     }
 
@@ -159,63 +289,94 @@ impl<S> SessionAuth<S> {
         &self.store
     }
 
-    /// The cookie name holding the session id.
-    pub fn cookie_name(&self) -> &str {
-        &self.cookie_name
+    /// The cookie the session id travels in.
+    pub fn cookie(&self) -> &CookieOptions {
+        &self.cookie
     }
 
-    /// The session TTL; renewed sessions keep the same TTL.
+    /// The sliding session TTL.
     pub fn ttl(&self) -> Duration {
         self.ttl
     }
 
-    /// The instant a fresh session expires (`now + ttl`).
-    ///
-    /// Falls back to `now` if the addition would overflow (absurdly large
-    /// TTL): the session is then immediately expired instead of panicking.
-    pub fn expires_at(&self) -> SystemTime {
-        let now = SystemTime::now();
-        now.checked_add(self.ttl).unwrap_or(now)
+    /// The absolute session lifetime cap, if one is configured.
+    pub fn absolute_ttl(&self) -> Option<Duration> {
+        self.absolute_ttl
     }
 
-    /// Creates a new session for `user_id` and returns its opaque id.
+    /// The instant `created_at` stops being renewable.
     ///
-    /// The id goes into the cookie via [`set_cookie_value`]. No cookie is set
-    /// here; the handler builds the login response.
+    /// `None` without an absolute cap. Saturates instead of overflowing for an
+    /// absurd `absolute_ttl`, so the session simply never hits the cap.
+    fn deadline(&self, created_at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.absolute_ttl.map(|cap| {
+            created_at
+                .checked_add_signed(delta(cap))
+                .unwrap_or(DateTime::<Utc>::MAX_UTC)
+        })
+    }
+
+    /// The expiry a session created at `created_at` has at `now`: the sliding
+    /// TTL, capped by the absolute deadline.
+    fn expiry(&self, created_at: DateTime<Utc>, now: DateTime<Utc>) -> DateTime<Utc> {
+        let sliding = now
+            .checked_add_signed(delta(self.ttl))
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
+        match self.deadline(created_at) {
+            Some(deadline) => sliding.min(deadline),
+            None => sliding,
+        }
+    }
+
+    /// Whether a stored session is dead at `now`, either by sliding expiry or
+    /// by having reached its absolute deadline.
+    fn is_dead<U>(&self, record: &SessionRecord<U>, now: DateTime<Utc>) -> bool {
+        record.expires_at <= now
+            || self
+                .deadline(record.created_at)
+                .is_some_and(|deadline| now >= deadline)
+    }
+}
+
+impl<S: SessionStore> SessionAuth<S> {
+    /// Creates a new session for `user` and returns its id.
+    ///
+    /// The id goes into the cookie via [`set_cookie_value`]; no cookie is set
+    /// here, the login handler builds its response. Only the id's digest
+    /// reaches the store.
     ///
     /// [`set_cookie_value`]: SessionAuth::set_cookie_value
-    pub async fn start(&self, user_id: i64) -> Result<String, ApiError>
-    where
-        S: SessionStore,
-    {
-        let session_id = Uuid::new_v4().to_string();
-        let now = SystemTime::now();
+    pub async fn start(&self, user: S::UserId) -> Result<SessionId, ApiError> {
+        let id = SessionId::generate();
+        let now = Utc::now();
         self.store
-            .create(&session_id, user_id, self.expires_at(), now)
+            .create(&id.digest(), user, now, self.expiry(now, now), now)
             .await?;
-        Ok(session_id)
+        Ok(id)
     }
 
     /// Deletes one session (logout).
-    pub async fn end(&self, session_id: &str) -> Result<(), ApiError>
-    where
-        S: SessionStore,
-    {
-        self.store.remove(session_id).await
+    ///
+    /// Idempotent: ending a session that is already gone is not an error.
+    pub async fn end(&self, id: &SessionId) -> Result<(), ApiError> {
+        if !self.store.remove(&id.digest()).await? {
+            tracing::debug!("logout of an unknown session");
+        }
+        Ok(())
     }
 
-    /// Deletes every session of a user (logout everywhere).
-    pub async fn end_for_user(&self, user_id: i64) -> Result<(), ApiError>
-    where
-        S: SessionStore,
-    {
-        self.store.remove_by_user(user_id).await
+    /// Deletes every session of a user (logout everywhere), returning how many
+    /// were deleted.
+    pub async fn end_for_user(&self, user: S::UserId) -> Result<u64, ApiError> {
+        self.store.remove_by_user(user).await
     }
 
     /// The `Set-Cookie` header value establishing a session with a fresh
     /// `Max-Age` equal to the TTL.
-    pub fn set_cookie_value(&self, session_id: &str) -> HeaderValue {
-        self.cookie_value(session_id, self.ttl.as_secs().min(i64::MAX as u64))
+    ///
+    /// The attributes come from the configured [`CookieOptions`].
+    pub fn set_cookie_value(&self, id: &SessionId) -> HeaderValue {
+        self.cookie_value(id.as_str(), self.ttl.as_secs())
     }
 
     /// The `Set-Cookie` header value that expires the session cookie
@@ -225,24 +386,40 @@ impl<S> SessionAuth<S> {
     }
 
     fn cookie_value(&self, value: &str, max_age: u64) -> HeaderValue {
-        let mut cookie = Cookie::new(self.cookie_name.clone(), value.to_string());
-        cookie.set_path("/");
-        cookie.set_http_only(true);
-        cookie.set_same_site(SameSite::Lax);
-        cookie.set_max_age(Some(cookie::time::Duration::seconds(max_age as i64)));
+        let mut cookie = Cookie::new(self.cookie.name.clone(), value.to_string());
+        cookie.set_path(self.cookie.path.clone());
+        cookie.set_http_only(self.cookie.http_only);
+        cookie.set_same_site(self.cookie.same_site);
+        if self.cookie.secure {
+            cookie.set_secure(Some(true));
+        }
+        if let Some(domain) = &self.cookie.domain {
+            cookie.set_domain(domain.clone());
+        }
+        cookie.set_max_age(Some(cookie::time::Duration::seconds(
+            max_age.min(i64::MAX as u64) as i64,
+        )));
         HeaderValue::from_str(&cookie.encoded().to_string())
             .unwrap_or_else(|_| HeaderValue::from_static(""))
     }
 }
 
 /// The authenticated principal extracted by [`session_layer`].
+///
+/// Parameterized by the store's [`UserId`](SessionStore::UserId), so a handler
+/// reads the application's own id type (`SessionCtx<u64>`); it defaults to
+/// `i64`.
 #[derive(Debug, Clone)]
-pub struct SessionCtx {
+pub struct SessionCtx<U = i64> {
     /// The authenticated user's id.
-    pub user_id: i64,
+    pub user_id: U,
 }
 
-impl<S: Send + Sync> FromRequestParts<S> for SessionCtx {
+impl<S, U> FromRequestParts<S> for SessionCtx<U>
+where
+    S: Send + Sync,
+    U: Clone + Send + Sync + 'static,
+{
     type Rejection = ApiError;
 
     async fn from_request_parts(
@@ -251,7 +428,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionCtx {
     ) -> Result<Self, Self::Rejection> {
         parts
             .extensions
-            .get::<SessionCtx>()
+            .get::<SessionCtx<U>>()
             .cloned()
             .ok_or_else(|| ApiError::unauthorized(texts().unauthorized.clone()))
     }
@@ -263,9 +440,13 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionCtx {
 /// A standalone newtype — Rust's orphan rules prevent implementing
 /// `FromRequestParts<S>` for `Option<SessionCtx>` directly.
 #[derive(Debug, Clone)]
-pub struct OptionalSessionCtx(pub Option<SessionCtx>);
+pub struct OptionalSessionCtx<U = i64>(pub Option<SessionCtx<U>>);
 
-impl<S: Send + Sync> FromRequestParts<S> for OptionalSessionCtx {
+impl<S, U> FromRequestParts<S> for OptionalSessionCtx<U>
+where
+    S: Send + Sync,
+    U: Clone + Send + Sync + 'static,
+{
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(
@@ -273,16 +454,51 @@ impl<S: Send + Sync> FromRequestParts<S> for OptionalSessionCtx {
         _state: &S,
     ) -> Result<Self, Self::Rejection> {
         Ok(OptionalSessionCtx(
-            parts.extensions.get::<SessionCtx>().cloned(),
+            parts.extensions.get::<SessionCtx<U>>().cloned(),
         ))
     }
 }
 
-/// Returns true when a session has lived past half its TTL and should be
-/// extended with the full TTL again (the `last_activity` threshold prevents
-/// renewing on every request, matching the reference implementation).
-pub fn should_extend(record: &SessionRecord, ttl: Duration) -> bool {
-    record.last_activity.elapsed().unwrap_or(Duration::ZERO) >= ttl / 2
+impl<S> FromRequestParts<S> for SessionId
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<SessionId>()
+            .cloned()
+            .ok_or_else(|| ApiError::unauthorized(texts().unauthorized.clone()))
+    }
+}
+
+/// Returns true when a session should be extended: it has been idle for at
+/// least half its TTL (the threshold prevents writing to the store on every
+/// request, matching the reference implementation).
+pub fn should_extend<U>(record: &SessionRecord<U>, ttl: Duration) -> bool {
+    idle_for(record) >= delta(ttl / 2)
+}
+
+/// How long ago the session was last used (zero for a future timestamp, which
+/// only clock skew can produce).
+fn idle_for<U>(record: &SessionRecord<U>) -> TimeDelta {
+    let idle = Utc::now().signed_duration_since(record.last_activity);
+    if idle < TimeDelta::zero() {
+        TimeDelta::zero()
+    } else {
+        idle
+    }
+}
+
+/// A standard [`Duration`] as a chrono delta, saturating where chrono cannot
+/// represent it (so an absurd TTL expires "never" instead of panicking).
+fn delta(duration: Duration) -> TimeDelta {
+    TimeDelta::from_std(duration).unwrap_or(TimeDelta::MAX)
 }
 
 /// The boxed future returned by the session middleware.
@@ -298,10 +514,10 @@ pub type SessionLayer<S> = FromFnLayer<
 /// Builds the cookie-session middleware layer.
 ///
 /// The layer resolves the session cookie, validates the session against the
-/// store (deleting expired ones) and stashes a [`SessionCtx`] in the request
-/// extensions; after the handler, it extends the session once the half-TTL
-/// threshold is reached and refreshes the cookie `Max-Age`. Invalid or
-/// expired sessions clear the stale browser cookie. The layer itself never
+/// store (deleting dead ones) and stashes [`SessionCtx`] and [`SessionId`] in
+/// the request extensions; after the handler it extends the session once the
+/// half-TTL threshold is reached and refreshes the cookie `Max-Age`. Invalid or
+/// dead sessions clear the stale browser cookie. The layer itself never
 /// rejects; use the [`SessionCtx`] or [`OptionalSessionCtx`] extractors.
 pub fn session_layer<S>(auth: SessionAuth<S>) -> SessionLayer<S>
 where
@@ -324,23 +540,27 @@ where
     S: SessionStore + Clone + Send + Sync + 'static,
 {
     Box::pin(async move {
-        let session_id = parse_cookie(request.headers(), auth.cookie_name()).map(str::to_string);
-        let now = SystemTime::now();
-        let mut found: Option<(String, SessionRecord)> = None;
+        let cookie = cookie_value(request.headers(), &auth.cookie().name);
+        let session = cookie.as_deref().map(|raw| SessionId(raw.to_string()));
+        let digest = session.as_ref().map(SessionId::digest);
+        let now = Utc::now();
+        let mut live: Option<SessionRecord<S::UserId>> = None;
         let mut lookup_error = false;
 
-        if let Some(id) = session_id.as_deref() {
-            match auth.store().find(id).await {
-                Ok(Some(record)) if record.expires_at > now => {
-                    found = Some((id.to_string(), record.clone()));
+        if let (Some(id), Some(digest)) = (&session, &digest) {
+            match auth.store().find(digest).await {
+                Ok(Some(record)) if !auth.is_dead(&record, now) => {
                     request.extensions_mut().insert(SessionCtx {
                         user_id: record.user_id,
                     });
+                    request.extensions_mut().insert(id.clone());
+                    live = Some(record);
                 }
                 Ok(Some(_)) => {
-                    // Expired: drop it (best effort) and clear the cookie below.
-                    if let Err(err) = auth.store().remove(id).await {
-                        tracing::warn!(error = %err, "failed to delete expired session");
+                    // Dead (expired or past its absolute cap): drop it and let
+                    // the response clear the cookie below.
+                    if let Err(err) = auth.store().remove(digest).await {
+                        tracing::warn!(error = %err, "failed to delete an expired session");
                     }
                 }
                 Ok(None) => {}
@@ -360,29 +580,23 @@ where
         // logout) — respect it: RFC 6265 last-wins would let our renew/clear
         // clobber it, and on transient lookup errors we must not clear a
         // possibly-valid cookie either.
-        let handler_owns_cookie =
-            response
-                .headers()
-                .get_all(header::SET_COOKIE)
-                .iter()
-                .any(|value| {
-                    value
-                        .to_str()
-                        .ok()
-                        .and_then(|raw| raw.split(';').next())
-                        .and_then(|pair| pair.split_once('='))
-                        .map(|(name, _)| name.trim() == auth.cookie_name())
-                        .unwrap_or(false)
-                });
+        let handler_owns_cookie = sets_cookie(response.headers(), &auth.cookie().name);
 
-        match &found {
-            Some((id, record)) => {
+        match (&live, &session, &digest) {
+            (Some(record), Some(id), Some(digest)) => {
                 if should_extend(record, auth.ttl()) && !handler_owns_cookie {
-                    match auth.store().touch(id, auth.expires_at(), now).await {
+                    // The session survived the lookup, so its absolute deadline
+                    // is still ahead: the renewal below can only move forward.
+                    let renewed = auth.expiry(record.created_at, now);
+                    match auth.store().touch(digest, renewed, now).await {
                         Ok(()) => {
-                            response
-                                .headers_mut()
-                                .append(header::SET_COOKIE, auth.set_cookie_value(id));
+                            // The cookie expires with the session, so the
+                            // client drops it at the absolute cap too.
+                            let max_age = (renewed - now).num_seconds().max(1) as u64;
+                            response.headers_mut().append(
+                                header::SET_COOKIE,
+                                auth.cookie_value(id.as_str(), max_age),
+                            );
                         }
                         Err(err) => {
                             tracing::warn!(error = %err, "session renewal failed");
@@ -390,13 +604,13 @@ where
                     }
                 }
             }
-            None if session_id.is_some() && !lookup_error && !handler_owns_cookie => {
-                // Stale cookie (unknown or expired session): expire it.
+            _ if session.is_some() && !lookup_error && !handler_owns_cookie => {
+                // Stale cookie (unknown or dead session): expire it.
                 response
                     .headers_mut()
                     .append(header::SET_COOKIE, auth.clear_cookie_value());
             }
-            None => {}
+            _ => {}
         }
 
         response
@@ -404,11 +618,24 @@ where
 }
 
 /// Extracts a cookie's value from the `Cookie` request header.
-fn parse_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    raw.split(';').map(str::trim).find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (key == name).then_some(value)
+    Cookie::split_parse(raw)
+        .filter_map(Result::ok)
+        .find(|cookie| cookie.name() == name)
+        .map(|cookie| cookie.value().to_string())
+}
+
+/// Whether the response already sets the session cookie.
+fn sets_cookie(headers: &HeaderMap, name: &str) -> bool {
+    headers.get_all(header::SET_COOKIE).iter().any(|value| {
+        value
+            .to_str()
+            .ok()
+            .and_then(|raw| raw.split(';').next())
+            .and_then(|pair| pair.split_once('='))
+            .map(|(cookie, _)| cookie.trim() == name)
+            .unwrap_or(false)
     })
 }
 
@@ -425,21 +652,45 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
+    type Store = Arc<Mutex<HashMap<String, SessionRecord<u64>>>>;
+
     #[derive(Clone, Default)]
-    struct InMemorySessionStore(Arc<Mutex<HashMap<String, SessionRecord>>>);
+    struct InMemorySessionStore(Store);
+
+    impl InMemorySessionStore {
+        fn insert(&self, digest: &str, record: SessionRecord<u64>) {
+            self.0.lock().insert(digest.to_string(), record);
+        }
+
+        fn get(&self, digest: &str) -> Option<SessionRecord<u64>> {
+            self.0.lock().get(digest).cloned()
+        }
+
+        fn contains(&self, digest: &str) -> bool {
+            self.0.lock().contains_key(digest)
+        }
+
+        fn keys(&self) -> Vec<String> {
+            self.0.lock().keys().cloned().collect()
+        }
+    }
 
     impl SessionStore for InMemorySessionStore {
+        type UserId = u64;
+
         async fn create(
             &self,
-            session_id: &str,
-            user_id: i64,
-            expires_at: SystemTime,
-            last_activity: SystemTime,
+            id: &str,
+            user: u64,
+            created_at: DateTime<Utc>,
+            expires_at: DateTime<Utc>,
+            last_activity: DateTime<Utc>,
         ) -> Result<(), ApiError> {
-            self.0.lock().insert(
-                session_id.to_string(),
+            self.insert(
+                id,
                 SessionRecord {
-                    user_id,
+                    user_id: user,
+                    created_at,
                     expires_at,
                     last_activity,
                 },
@@ -447,47 +698,62 @@ mod tests {
             Ok(())
         }
 
-        async fn find(&self, session_id: &str) -> Result<Option<SessionRecord>, ApiError> {
-            Ok(self.0.lock().get(session_id).cloned())
+        async fn find(&self, id: &str) -> Result<Option<SessionRecord<u64>>, ApiError> {
+            Ok(self.get(id))
         }
 
         async fn touch(
             &self,
-            session_id: &str,
-            expires_at: SystemTime,
-            last_activity: SystemTime,
+            id: &str,
+            expires_at: DateTime<Utc>,
+            last_activity: DateTime<Utc>,
         ) -> Result<(), ApiError> {
-            if let Some(record) = self.0.lock().get_mut(session_id) {
+            if let Some(record) = self.0.lock().get_mut(id) {
                 record.expires_at = expires_at;
                 record.last_activity = last_activity;
             }
             Ok(())
         }
 
-        async fn remove(&self, session_id: &str) -> Result<(), ApiError> {
-            self.0.lock().remove(session_id);
-            Ok(())
+        async fn remove(&self, id: &str) -> Result<bool, ApiError> {
+            Ok(self.0.lock().remove(id).is_some())
         }
 
-        async fn remove_by_user(&self, user_id: i64) -> Result<(), ApiError> {
-            self.0.lock().retain(|_, r| r.user_id != user_id);
-            Ok(())
+        async fn remove_by_user(&self, user: u64) -> Result<u64, ApiError> {
+            let mut store = self.0.lock();
+            let before = store.len() as u64;
+            store.retain(|_, record| record.user_id != user);
+            Ok(before - store.len() as u64)
         }
     }
 
     const TTL: Duration = Duration::from_secs(120);
 
-    fn auth<S: SessionStore + Clone>(store: S) -> SessionAuth<S> {
-        SessionAuth::new(store, "sid", TTL)
+    fn auth<S: SessionStore + Clone>(store: S, absolute_ttl: Option<Duration>) -> SessionAuth<S> {
+        SessionAuth::new(store, CookieOptions::new("sid"), TTL, absolute_ttl)
     }
 
-    fn me_app(store: InMemorySessionStore) -> Router {
+    fn record(
+        user_id: u64,
+        created_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+        last_activity: DateTime<Utc>,
+    ) -> SessionRecord<u64> {
+        SessionRecord {
+            user_id,
+            created_at,
+            expires_at,
+            last_activity,
+        }
+    }
+
+    fn me_app(auth: SessionAuth<InMemorySessionStore>) -> Router {
         Router::new()
             .route(
                 "/me",
-                get(|SessionCtx { user_id }: SessionCtx| async move { user_id.to_string() }),
+                get(|SessionCtx { user_id }: SessionCtx<u64>| async move { user_id.to_string() }),
             )
-            .layer(session_layer(auth(store)))
+            .layer(session_layer(auth))
     }
 
     fn req_get(uri: &str, cookie: Option<&str>) -> Request<Body> {
@@ -495,13 +761,12 @@ mod tests {
         if let Some(cookie) = cookie {
             builder = builder.header(header::COOKIE, cookie);
         }
-        builder.body(Body::empty()).unwrap()
+        builder.body(Body::empty()).expect("request builds")
     }
 
     async fn drive(app: Router, req: Request<Body>) -> (StatusCode, Response) {
         let response = app.oneshot(req).await.expect("request succeeds");
-        let status = response.status();
-        (status, response)
+        (response.status(), response)
     }
 
     async fn body_text(response: Response) -> String {
@@ -519,18 +784,26 @@ mod tests {
             .headers()
             .get_all(header::SET_COOKIE)
             .iter()
-            .map(|v| v.to_str().unwrap_or("").to_string())
+            .map(|value| value.to_str().unwrap_or("").to_string())
             .collect::<Vec<_>>()
             .join("; ")
     }
 
+    fn max_age(cookie: &str) -> u64 {
+        cookie
+            .split(';')
+            .find_map(|part| part.trim().strip_prefix("Max-Age="))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("no Max-Age in {cookie}"))
+    }
+
     #[tokio::test]
     async fn missing_cookie_is_401() {
-        let app = me_app(InMemorySessionStore::default());
+        let app = me_app(auth(InMemorySessionStore::default(), None));
         let (status, response) = drive(app, req_get("/me", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let body = body_text(response).await;
-        let json: serde_json::Value = serde_json::from_str(&body).expect("error body is json");
+        let json: serde_json::Value =
+            serde_json::from_str(&body_text(response).await).expect("error body is json");
         assert_eq!(json["code"], 401);
         assert_eq!(json["message"], texts().unauthorized.as_ref());
         assert_eq!(json["data"], serde_json::Value::Null);
@@ -538,72 +811,62 @@ mod tests {
 
     #[tokio::test]
     async fn valid_session_reaches_handler() {
-        let now = SystemTime::now();
+        let now = Utc::now();
         let store = InMemorySessionStore::default();
-        store.create("s1", 7, now + TTL, now).await.expect("create");
-        let app = me_app(store);
+        store.insert(&hash_token("s1"), record(7, now, now + delta(TTL), now));
+        let app = me_app(auth(store, None));
 
-        let req = Request::builder()
-            .uri("/me")
-            .header(header::COOKIE, "sid=s1")
-            .body(Body::empty())
-            .unwrap();
-        let (status, response) = drive(app, req).await;
+        let (status, response) = drive(app, req_get("/me", Some("sid=s1"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body_text(response).await, "7");
     }
 
     #[tokio::test]
     async fn expired_session_is_removed_and_cookie_cleared() {
-        let now = SystemTime::now();
+        let now = Utc::now();
         let store = InMemorySessionStore::default();
-        store
-            .create(
-                "s1",
+        store.insert(
+            &hash_token("s1"),
+            record(
                 7,
-                now - Duration::from_secs(10),
-                now - Duration::from_secs(130),
-            )
-            .await
-            .expect("create");
-        let app = me_app(store.clone());
+                now - TimeDelta::seconds(200),
+                now - TimeDelta::seconds(10),
+                now,
+            ),
+        );
+        let app = me_app(auth(store.clone(), None));
 
         let (status, response) = drive(app, req_get("/me", Some("sid=s1"))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let set_cookie = set_cookies(&response);
-        assert!(set_cookie.contains("Max-Age=0"), "set-cookie: {set_cookie}");
-        assert!(store.0.lock().get("s1").is_none());
+        assert!(set_cookies(&response).contains("Max-Age=0"));
+        assert!(!store.contains(&hash_token("s1")));
     }
 
     #[tokio::test]
     async fn half_ttl_elapsed_renews_expiry_and_cookie() {
-        let now = SystemTime::now();
+        let now = Utc::now();
         let store = InMemorySessionStore::default();
-        store
-            .create(
-                "s1",
+        store.insert(
+            &hash_token("s1"),
+            record(
                 7,
-                now + Duration::from_secs(59),
-                now - Duration::from_secs(61),
-            )
-            .await
-            .expect("create");
-        let app = me_app(store.clone());
+                now - TimeDelta::seconds(120),
+                now + TimeDelta::seconds(59),
+                now - TimeDelta::seconds(61),
+            ),
+        );
+        let app = me_app(auth(store.clone(), None));
 
         let (status, response) = drive(app, req_get("/me", Some("sid=s1"))).await;
         assert_eq!(status, StatusCode::OK);
 
-        let updated = store.0.lock().get("s1").cloned().expect("session kept");
+        let renewed = store.get(&hash_token("s1")).expect("session kept");
         assert!(
-            updated.expires_at > now + Duration::from_secs(110),
+            renewed.expires_at > now + TimeDelta::seconds(110),
             "expiry not renewed: {:?}",
-            updated.expires_at
+            renewed.expires_at
         );
-        let set_cookie = set_cookies(&response);
-        assert!(
-            set_cookie.contains("Max-Age=120"),
-            "set-cookie: {set_cookie}"
-        );
+        assert_eq!(max_age(&set_cookies(&response)), TTL.as_secs());
     }
 
     #[tokio::test]
@@ -611,11 +874,13 @@ mod tests {
         let app = Router::new()
             .route(
                 "/any",
-                get(|OptionalSessionCtx(ctx): OptionalSessionCtx| async move {
-                    ctx.is_some().to_string()
-                }),
+                get(
+                    |OptionalSessionCtx(ctx): OptionalSessionCtx<u64>| async move {
+                        ctx.is_some().to_string()
+                    },
+                ),
             )
-            .layer(session_layer(auth(InMemorySessionStore::default())));
+            .layer(session_layer(auth(InMemorySessionStore::default(), None)));
 
         let (status, response) = drive(app, req_get("/any", None)).await;
         assert_eq!(status, StatusCode::OK);
@@ -624,34 +889,33 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_session_is_401_and_cookie_cleared() {
-        let app = me_app(InMemorySessionStore::default());
+        let app = me_app(auth(InMemorySessionStore::default(), None));
         let (status, response) = drive(app, req_get("/me", Some("sid=nope"))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let set_cookie = set_cookies(&response);
-        assert!(set_cookie.contains("Max-Age=0"), "set-cookie: {set_cookie}");
+        assert!(set_cookies(&response).contains("Max-Age=0"));
     }
 
     #[tokio::test]
     async fn handler_set_cookie_is_not_clobbered_by_renewal() {
-        let now = SystemTime::now();
+        let now = Utc::now();
         let store = InMemorySessionStore::default();
         // Old-but-valid session that would trigger renewal (past half TTL).
-        store
-            .create(
-                "s1",
+        store.insert(
+            &hash_token("s1"),
+            record(
                 7,
-                now + Duration::from_secs(59),
-                now - Duration::from_secs(61),
-            )
-            .await
-            .expect("create");
-        let auth = auth(store);
+                now - TimeDelta::seconds(120),
+                now + TimeDelta::seconds(59),
+                now - TimeDelta::seconds(61),
+            ),
+        );
+        let auth = auth(store, None);
         let handler_auth = auth.clone();
         let app = Router::new()
             .route(
                 "/login",
-                get(move |SessionCtx { user_id }: SessionCtx| {
-                    let value = handler_auth.set_cookie_value("s2");
+                get(move |SessionCtx { user_id }: SessionCtx<u64>| {
+                    let value = handler_auth.set_cookie_value(&SessionId("s2".to_string()));
                     async move { ([(header::SET_COOKIE, value)], format!("ok {user_id}")) }
                 }),
             )
@@ -659,19 +923,19 @@ mod tests {
 
         let (status, response) = drive(app, req_get("/login", Some("sid=s1"))).await;
         assert_eq!(status, StatusCode::OK);
-        let set_cookie = set_cookies(&response);
+        let cookie = set_cookies(&response);
         assert_eq!(body_text(response).await, "ok 7");
         assert!(
-            !set_cookie.contains("s1"),
-            "stale session id clobbered the handler cookie: {set_cookie}"
+            !cookie.contains("s1"),
+            "stale session id clobbered the handler cookie: {cookie}"
         );
         assert!(
-            set_cookie.contains("sid=s2"),
-            "handler cookie missing: {set_cookie}"
+            cookie.contains("sid=s2"),
+            "handler cookie missing: {cookie}"
         );
         assert!(
-            !set_cookie.contains("Max-Age=0"),
-            "clear cookie clobbered the handler cookie: {set_cookie}"
+            !cookie.contains("Max-Age=0"),
+            "clear cookie clobbered the handler cookie: {cookie}"
         );
     }
 
@@ -679,35 +943,38 @@ mod tests {
     struct FailingStore;
 
     impl SessionStore for FailingStore {
+        type UserId = u64;
+
         async fn create(
             &self,
-            _session_id: &str,
-            _user_id: i64,
-            _expires_at: SystemTime,
-            _last_activity: SystemTime,
+            _id: &str,
+            _user: u64,
+            _created_at: DateTime<Utc>,
+            _expires_at: DateTime<Utc>,
+            _last_activity: DateTime<Utc>,
         ) -> Result<(), ApiError> {
             Ok(())
         }
 
-        async fn find(&self, _session_id: &str) -> Result<Option<SessionRecord>, ApiError> {
+        async fn find(&self, _id: &str) -> Result<Option<SessionRecord<u64>>, ApiError> {
             Err(ApiError::internal("lookup failed"))
         }
 
         async fn touch(
             &self,
-            _session_id: &str,
-            _expires_at: SystemTime,
-            _last_activity: SystemTime,
+            _id: &str,
+            _expires_at: DateTime<Utc>,
+            _last_activity: DateTime<Utc>,
         ) -> Result<(), ApiError> {
             Ok(())
         }
 
-        async fn remove(&self, _session_id: &str) -> Result<(), ApiError> {
-            Ok(())
+        async fn remove(&self, _id: &str) -> Result<bool, ApiError> {
+            Ok(false)
         }
 
-        async fn remove_by_user(&self, _user_id: i64) -> Result<(), ApiError> {
-            Ok(())
+        async fn remove_by_user(&self, _user: u64) -> Result<u64, ApiError> {
+            Ok(0)
         }
     }
 
@@ -716,16 +983,173 @@ mod tests {
         let app = Router::new()
             .route(
                 "/me",
-                get(|SessionCtx { user_id }: SessionCtx| async move { user_id.to_string() }),
+                get(|SessionCtx { user_id }: SessionCtx<u64>| async move { user_id.to_string() }),
             )
-            .layer(session_layer(auth(FailingStore)));
+            .layer(session_layer(auth(FailingStore, None)));
 
         let (status, response) = drive(app, req_get("/me", Some("sid=s1"))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let set_cookie = set_cookies(&response);
+        let cookie = set_cookies(&response);
         assert!(
-            !set_cookie.contains("Max-Age=0"),
-            "transient lookup error must not clear the client cookie: {set_cookie}"
+            !cookie.contains("Max-Age=0"),
+            "transient lookup error must not clear the client cookie: {cookie}"
+        );
+    }
+
+    #[tokio::test]
+    async fn store_sees_only_digests_and_the_extractor_the_raw_id() {
+        let store = InMemorySessionStore::default();
+        let auth = auth(store.clone(), None);
+        let id = auth.start(42).await.expect("start");
+
+        assert_eq!(
+            store.keys(),
+            vec![id.digest()],
+            "the store must key sessions by digest"
+        );
+        assert_eq!(id.digest().len(), 64);
+        assert!(
+            !store.contains(id.as_str()),
+            "the raw id must never reach the store"
+        );
+
+        // The extractor hands the handler the raw id, which is what logout
+        // needs to hand back to `SessionAuth::end`.
+        let seen: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let captured = seen.clone();
+        let app = Router::new()
+            .route(
+                "/id",
+                get(move |id: SessionId| {
+                    let captured = captured.clone();
+                    async move {
+                        *captured.lock() = id.0;
+                        "ok"
+                    }
+                }),
+            )
+            .layer(session_layer(auth));
+
+        let (status, _) = drive(app, req_get("/id", Some(&format!("sid={}", id.as_str())))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(*seen.lock(), id.as_str());
+    }
+
+    #[tokio::test]
+    async fn start_end_and_end_for_user_touch_only_the_store() {
+        let store = InMemorySessionStore::default();
+        let auth = auth(store.clone(), None);
+
+        let first = auth.start(7).await.expect("start");
+        let second = auth.start(7).await.expect("start");
+        let other = auth.start(8).await.expect("start");
+        assert_eq!(store.keys().len(), 3);
+        assert_ne!(first.digest(), second.digest(), "ids must be unique");
+
+        auth.end(&first).await.expect("end");
+        assert!(!store.contains(&first.digest()));
+        auth.end(&first).await.expect("end is idempotent");
+
+        assert_eq!(auth.end_for_user(7).await.expect("end_for_user"), 1);
+        assert!(store.contains(&other.digest()));
+    }
+
+    #[tokio::test]
+    async fn cookie_attributes_default_to_secure_http_only_lax() {
+        let id = SessionId("raw".to_string());
+        let secure = auth(InMemorySessionStore::default(), None);
+        let cookie = secure
+            .set_cookie_value(&id)
+            .to_str()
+            .expect("ascii cookie")
+            .to_string();
+        assert!(cookie.contains("sid=raw"), "{cookie}");
+        assert!(cookie.contains("Secure"), "{cookie}");
+        assert!(cookie.contains("HttpOnly"), "{cookie}");
+        assert!(cookie.contains("SameSite=Lax"), "{cookie}");
+        assert!(cookie.contains("Path=/"), "{cookie}");
+        assert_eq!(max_age(&cookie), TTL.as_secs());
+        assert!(!cookie.contains("Max-Age=0"), "{cookie}");
+
+        let insecure = SessionAuth::new(
+            InMemorySessionStore::default(),
+            CookieOptions::new("sid").insecure(),
+            TTL,
+            None,
+        );
+        let cookie = insecure
+            .set_cookie_value(&id)
+            .to_str()
+            .expect("ascii cookie")
+            .to_string();
+        assert!(!cookie.contains("Secure"), "{cookie}");
+        assert_eq!(max_age(insecure.clear_cookie_value().to_str().unwrap()), 0);
+    }
+
+    #[tokio::test]
+    async fn absolute_ttl_kills_a_session_that_is_still_active() {
+        let now = Utc::now();
+        let store = InMemorySessionStore::default();
+        // The sliding expiry is 60s away and the session was active a minute
+        // ago, but it is two hours old under a one-hour cap.
+        store.insert(
+            &hash_token("raw"),
+            record(
+                7,
+                now - TimeDelta::hours(2),
+                now + TimeDelta::seconds(60),
+                now - TimeDelta::seconds(61),
+            ),
+        );
+        let app = me_app(auth(store.clone(), Some(Duration::from_secs(3600))));
+
+        let (status, response) = drive(app, req_get("/me", Some("sid=raw"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(set_cookies(&response).contains("Max-Age=0"));
+        assert!(
+            !store.contains(&hash_token("raw")),
+            "the session past its cap must be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn absolute_ttl_caps_the_renewal_and_the_cookie() {
+        let now = Utc::now();
+        let store = InMemorySessionStore::default();
+        // Renewal is due (idle past half the TTL) and the cap is 30s away, so
+        // the renewed expiry must stop at the cap instead of taking the full
+        // TTL — and the cookie must shrink with it.
+        let created_at = now - TimeDelta::seconds(3570);
+        let deadline = created_at + TimeDelta::seconds(3600);
+        store.insert(
+            &hash_token("raw"),
+            record(
+                7,
+                created_at,
+                now + TimeDelta::seconds(30),
+                now - TimeDelta::seconds(61),
+            ),
+        );
+        let app = me_app(auth(store.clone(), Some(Duration::from_secs(3600))));
+
+        let (status, response) = drive(app, req_get("/me", Some("sid=raw"))).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let renewed = store.get(&hash_token("raw")).expect("session kept");
+        assert!(
+            renewed.expires_at <= deadline,
+            "renewal went past the cap: {:?} > {deadline:?}",
+            renewed.expires_at
+        );
+        assert!(
+            renewed.expires_at > now,
+            "renewal must still extend a live session"
+        );
+        let cookie = set_cookies(&response);
+        let age = max_age(&cookie);
+        assert!(
+            (25..=30).contains(&age),
+            "cookie must expire with the cap, got Max-Age={age}: {cookie}"
         );
     }
 }

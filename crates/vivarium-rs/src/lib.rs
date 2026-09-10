@@ -98,12 +98,15 @@ pub use vivarium_macros::Entity;
 
 #[cfg(feature = "web")]
 pub use vivarium_web::{
-    ApiError, ApiResponse, ErrorKind, FieldViolation, FormVarser, Initializer, OptionalSessionCtx,
-    PathVarser, PermissionSet, QueryVarser, RefreshTokenManager, RefreshTokenRecord,
-    RefreshTokenStore, Result, SessionAuth, SessionCtx, SessionRecord, SessionStore, Texts,
-    TokenPair, ValidationErrors, Varser, authz, cache, debug_mode, error, get_authorization, hash,
-    install_debug_mode, install_texts, jwt, password, perms_match, response, serve, session,
-    session_layer, texts, token, validation, varser, verify, verify_login,
+    AccessClaims, ApiError, ApiResponse, Argon2Params, CacheControl, Claims, CookieOptions,
+    ErrorKind, FieldViolation, FormVarser, Initializer, JwtConfig, JwtVerifier, KeyRing,
+    OptionalSessionCtx, PathVarser, PermissionSet, QueryVarser, RefreshTokenManager,
+    RefreshTokenRecord, RefreshTokenStore, Result, SameSite, SessionAuth, SessionCtx, SessionId,
+    SessionRecord, SessionStore, Texts, TokenPair, ValidationErrors, Varser, VerifyOutcome, authz,
+    cache, debug_mode, error, get_authorization, hash, hash_token, hash_with, install_debug_mode,
+    install_texts, jwt, needs_rehash, password, perms_match, response, secrets, serve,
+    serve_with_shutdown, session, session_layer, shutdown_signal, texts, token, validation, varser,
+    verify, verify_and_upgrade, verify_login,
 };
 
 #[cfg(all(feature = "web", feature = "validation-garde"))]

@@ -31,6 +31,8 @@ validation-garde = ["vivarium-web?/validation-garde"]
 utoipa = ["vivarium-core/utoipa", "vivarium-web?/utoipa"]
 # `openapi::mount`: serves the spec plus Scalar and Swagger UI.
 utoipa-ui = ["utoipa", "vivarium-web?/utoipa-ui"]
+# `vivarium_web::serve::telemetry::init`: stdout plus optional JSON log files.
+telemetry = ["vivarium-web?/telemetry"]
 
 [dependencies]
 vivarium-core = { version = "0.1.0", path = "../vivarium-core" }

@@ -68,19 +68,33 @@ back in `params`.
   equivalents bound to `garde::Validate`
 - `validation::{ValidationErrors, FieldViolation}` — the structured `errors`
   payload, with flattened paths (`profile.email`, `items[0].name`)
-- `jwt` — HS256 sign/verify (`sign_token` / `decode_token`, RS256 rejected)
-  and `jwt_auth` middleware inserting claims into extensions (failures → 401)
-- `session` — cookie sessions with sliding renewal: `SessionAuth`,
-  `SessionStore` (app-owned table), `session_layer`, `SessionCtx` /
-  `OptionalSessionCtx`; expired sessions are deleted, stale cookies cleared
+- `jwt` — HS256 signing and verification: `JwtVerifier` (`JwtConfig` for
+  leeway/audience/issuer/required claims, `KeyRing` holding retired secrets
+  through a rotation), `layer` / `optional_layer` middlewares inserting the
+  claims into extensions, plus the `sign_token` / `decode_token` / `jwt_auth`
+  shorthands (RS256 rejected)
+- `session` — cookie sessions with a sliding TTL and an absolute cap:
+  `SessionAuth` (`CookieOptions` defaults to `Secure; HttpOnly; SameSite=Lax`),
+  `SessionStore` (app-owned table, keyed by the SHA-256 digest of the id),
+  `session_layer`, and the `SessionCtx` / `OptionalSessionCtx` / `SessionId`
+  extractors; dead sessions are deleted and stale cookies cleared
 - `token` — single-use refresh-token rotation: `RefreshTokenManager`,
-  `RefreshTokenStore`, `TokenPair`; a replayed or raced token fails 401
+  `RefreshTokenStore` (digests only), `AccessClaims` / `Claims`, and a
+  `TokenPair` carrying `expires_in`; the manager overwrites `sub`/`exp`/`iat`,
+  so a replayed, raced or stolen token cannot mint a token for another user
+  (401)
 - `authz` — RBAC permission wildcards: `perms_match` (`*`, exact,
   `prefix:*`) and `PermissionSet` with `require` → 403
-- `password` — Argon2 `hash` / `verify` / `verify_login`; the unknown-user
+- `password` — Argon2id `hash` / `hash_with` / `verify` / `verify_login` /
+  `needs_rehash` / `verify_and_upgrade`; `Argon2Params` defaults to the
+  reference profile, so existing hashes keep verifying, and the unknown-user
   login path verifies a dummy hash, defeating username-enumeration timing
-- `cache::Cache { seconds }` — tower layer emitting `Cache-Control`
-- `serve` — startup helper returning `Result`
+- `cache::CacheControl` — `Public(secs)` / `Private(secs)` / `NoCache` /
+  `NoStore`, applied with `.layer()`; an existing `Cache-Control` wins and
+  4xx/5xx responses are never stamped
+- `serve` — `serve`, `serve_with_shutdown` and `shutdown_signal` (Ctrl-C and
+  SIGTERM), plus with the `telemetry` feature `telemetry::init`: stdout lines
+  and daily-rotated JSON logs, flushed when the returned guard drops
 - `openapi` (feature `utoipa`) — `session_cookie_scheme`, `bearer_scheme`,
   `info`, and `mount` (feature `utoipa-ui`: Scalar + Swagger UI +
   `openapi.json`), plus the handler conventions the generated SDKs depend on
@@ -107,5 +121,45 @@ back in `params`.
 | `utoipa` | no | `ToSchema` derives, security schemes, `info` |
 | `utoipa-ui` | no | `openapi::mount` |
 | `sqlx` | no | `From<sqlx::Error> for ApiError`, `ApiError::conflict_from_db` |
+| `telemetry` | no | `serve::telemetry::init` (stdout + JSON log files) |
 
 MSRV: Rust 1.94.
+
+## Upgrading to 0.3 (auth)
+
+The authentication modules changed shape; two migrations are unavoidable on
+the application side.
+
+**Credentials are stored as digests.** Session ids and refresh tokens are
+random 32-byte base64url strings now, and the stores only ever receive their
+SHA-256 digest (`hash_token`, 64 characters). Existing rows hold raw ids that
+no longer match anything, so they must be cleared (or migrated) while everyone
+is logged out; the digest column also has to be wide enough:
+
+```sql
+-- MySQL dialect; `VARCHAR(64)` replaces the UUID `VARCHAR(36)`.
+ALTER TABLE sessions
+    MODIFY session_id VARCHAR(64) NOT NULL,   -- sha256 digest
+    ADD COLUMN last_activity DATETIME NOT NULL DEFAULT (UTC_TIMESTAMP());
+ALTER TABLE refresh_tokens
+    MODIFY token VARCHAR(64) NOT NULL,        -- sha256 digest
+    ADD COLUMN last_activity DATETIME NOT NULL DEFAULT (UTC_TIMESTAMP());
+
+-- Raw ids are unreadable by 0.3: logging everyone out is the migration.
+DELETE FROM sessions;
+DELETE FROM refresh_tokens;
+```
+
+`SessionRecord` carries `created_at` (the base of `absolute_ttl`) besides
+`expires_at` and `last_activity`, and the stores are keyed by the
+application's own user id type (`type UserId`), not `i64`.
+
+**Timestamps are `chrono::DateTime<Utc>`.** `SessionStore` and
+`RefreshTokenStore` take UTC datetimes instead of `std::time::SystemTime`, so
+a `DATETIME`/`TIMESTAMP` column maps directly; epoch seconds are the portable
+fallback.
+
+**Cookie and cache behaviour defaults changed.** Sessions default to
+`Secure; HttpOnly; SameSite=Lax; Path=/` (call `CookieOptions::insecure()` for
+plain-HTTP development), and the cache layer no longer stamps 4xx/5xx
+responses — a 401 that used to be marked `public` is now left alone.

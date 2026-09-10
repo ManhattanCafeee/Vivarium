@@ -13,6 +13,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Re-exports follow the 0.3 APIs: CRUD helpers are typed by `Entity::Id`,
   `Page`/`Pagination` use the `items`/`per_page` field names, and
   `ApiError`/`ApiResponse` replaced the old error enum.
+- The authentication surface follows `vivarium-web` 0.3: sessions and refresh
+  tokens are stored as SHA-256 digests, `SessionAuth::new` takes
+  `CookieOptions` and an absolute TTL, `RefreshTokenManager::rotate` takes a
+  rebuild callback, and `cache::Cache` became `cache::CacheControl`.
 - MSRV 1.85 → 1.94 (sqlx 0.9).
 
 ### Added
@@ -22,8 +26,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `NullType`, `EncodeError`, `ConfigOptions`, `ConfigWatcher`, `HandlerId`,
   `ApiResponse`, `ErrorKind`, `Texts`, `install_texts`, `ValidationErrors`,
   `FieldViolation`, the `openapi` module, and the `Garde*` extractors.
-- Facade features `utoipa`, `utoipa-ui`, and `validation-garde`; the `db`
-  feature also enables `vivarium-web/sqlx`.
+- Facade features `utoipa`, `utoipa-ui`, `validation-garde`, and `telemetry`;
+  the `db` feature also enables `vivarium-web/sqlx`.
+- Re-exports of the 0.3 authentication surface: `Hash`-free helpers
+  (`hash_token`, `hash_with`, `needs_rehash`, `verify_and_upgrade`),
+  `Argon2Params`, `VerifyOutcome`, `AccessClaims`, `Claims`, `SessionId`,
+  `CookieOptions`, `SameSite`, `CacheControl`, `JwtConfig`, `JwtVerifier`,
+  `KeyRing`, `serve_with_shutdown`, and `shutdown_signal`.
 
 ### Documentation
 

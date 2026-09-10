@@ -52,12 +52,18 @@ impl PermissionSet {
     }
 
     /// Returns `Ok(())` when `target` is granted, otherwise
-    /// `Err(ApiError::forbidden)` with a `permission denied` message.
+    /// `Err(ApiError::forbidden)` with the catalog's
+    /// [`forbidden`](crate::texts::Texts::forbidden) message.
+    ///
+    /// The refused code is logged (at debug level), not returned: which
+    /// permission was missing is useful to an operator and a hint to an
+    /// attacker.
     pub fn require(&self, target: &str) -> Result<(), ApiError> {
         if self.has(target) {
             Ok(())
         } else {
-            Err(ApiError::forbidden(format!("permission denied: {target}")))
+            tracing::debug!(target, held = ?self.codes, "permission denied");
+            Err(ApiError::forbidden(crate::texts::texts().forbidden.clone()))
         }
     }
 
@@ -102,6 +108,11 @@ mod tests {
         assert!(perms.require("user:write").is_ok());
         let err = perms.require("admin:x").expect_err("must be denied");
         assert_eq!(err.kind(), crate::error::ErrorKind::Forbidden);
-        assert_eq!(err.to_string(), "permission denied: admin:x");
+        assert_eq!(err.message(), crate::texts::texts().forbidden.as_ref());
+        assert!(
+            !err.message().contains("admin:x"),
+            "the refused code belongs in the logs, not in the response: {}",
+            err.message()
+        );
     }
 }

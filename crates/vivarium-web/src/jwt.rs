@@ -1,7 +1,50 @@
-//! JWT signing, verification, and an axum authentication middleware.
+//! JWT signing, verification, and axum authentication middlewares.
+//!
+//! HS256 is the only accepted algorithm: a token whose header declares
+//! anything else (for example RS256) is rejected, which closes the
+//! algorithm-confusion attack. The signing secret is the configured primary
+//! key; [`KeyRing::previous`] holds retired secrets that still verify during a
+//! rotation window.
+//!
+//! Two layers build on a [`JwtVerifier`]:
+//!
+//! - [`JwtVerifier::layer`] requires a bearer token and stores the decoded
+//!   claims in the request extensions, where [`Extension`](axum::Extension)
+//!   extracts them.
+//! - [`JwtVerifier::optional_layer`] stores `Option<C>` instead: a request
+//!   without an `Authorization` header passes through as `None`, while a
+//!   present-but-invalid token is still rejected.
+//!
+//! ```no_run
+//! use axum::{Extension, Router, routing::get};
+//! use serde::{Deserialize, Serialize};
+//! use vivarium_web::jwt::{JwtConfig, JwtVerifier, KeyRing};
+//!
+//! #[derive(Clone, Serialize, Deserialize)]
+//! struct Claims {
+//!     sub: u64,
+//!     exp: i64,
+//! }
+//!
+//! let verifier = JwtVerifier::new(
+//!     JwtConfig::default(),
+//!     KeyRing::new("current-secret"),
+//! );
+//! let token = verifier.encode(&Claims { sub: 7, exp: 4_000_000_000 }).expect("sign");
+//! let claims: Claims = verifier.decode(&token).expect("verify");
+//! assert_eq!(claims.sub, 7);
+//!
+//! let app: Router = Router::new()
+//!     .route("/me", get(|Extension(claims): Extension<Claims>| async move {
+//!         claims.sub.to_string()
+//!     }))
+//!     .layer(verifier.layer::<Claims>());
+//! ```
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use axum::extract::{Request, State};
 use axum::http::HeaderMap;
@@ -15,39 +58,225 @@ use crate::error::ApiError;
 use crate::texts::texts;
 use crate::varser::get_authorization;
 
+/// How a [`JwtVerifier`] validates a token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JwtConfig {
+    /// Clock skew tolerated on `exp` (and `nbf`), in seconds.
+    pub leeway: Duration,
+    /// The required `aud`, when the deployment issues audience-scoped tokens.
+    ///
+    /// `None` disables the audience check entirely, so tokens carrying any (or
+    /// no) `aud` verify; `Some` requires the tokens' `aud` to match. Add
+    /// `"aud"` to [`required_spec_claims`](Self::required_spec_claims) to make
+    /// the claim mandatory rather than merely checked.
+    pub audience: Option<String>,
+    /// The required `iss`, when tokens are issued by several parties.
+    pub issuer: Option<String>,
+    /// Registered claims that must be present. Defaults to `["exp"]`.
+    pub required_spec_claims: Vec<String>,
+}
+
+impl Default for JwtConfig {
+    /// The library defaults: 60 seconds of leeway, no audience or issuer
+    /// requirement, and `exp` mandatory.
+    fn default() -> Self {
+        Self {
+            leeway: Duration::from_secs(60),
+            audience: None,
+            issuer: None,
+            required_spec_claims: vec!["exp".to_string()],
+        }
+    }
+}
+
+/// The signing keys of a deployment: one primary, plus retired ones.
+///
+/// [`encode`](JwtVerifier::encode) always signs with `primary`; a token is
+/// verified against `primary` first and then against each of `previous` in
+/// order, which is what lets a rotation overlap (old tokens keep verifying
+/// until they expire, new ones are only accepted under the new secret).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRing {
+    /// The secret new tokens are signed with.
+    pub primary: String,
+    /// Retired secrets that still verify, newest first.
+    pub previous: Vec<String>,
+}
+
+impl KeyRing {
+    /// A ring with a single signing key.
+    pub fn new(primary: impl Into<String>) -> Self {
+        Self {
+            primary: primary.into(),
+            previous: Vec::new(),
+        }
+    }
+
+    /// The secrets to try when verifying, in order.
+    fn verification_keys(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.primary.as_str()).chain(self.previous.iter().map(String::as_str))
+    }
+}
+
+/// Signs and verifies tokens with one algorithm, one configuration and a key
+/// ring.
+///
+/// ```
+/// use vivarium_web::jwt::{JwtConfig, JwtVerifier, KeyRing};
+///
+/// let verifier = JwtVerifier::new(JwtConfig::default(), KeyRing::new("secret"));
+/// let token = verifier.encode(&serde_json::json!({ "sub": 1, "exp": 4_000_000_000_i64 }))
+///     .expect("sign");
+/// let claims: serde_json::Value = verifier.decode(&token).expect("verify");
+/// assert_eq!(claims["sub"], 1);
+/// ```
+#[derive(Debug, Clone)]
+pub struct JwtVerifier {
+    config: JwtConfig,
+    keys: KeyRing,
+}
+
+impl JwtVerifier {
+    /// Builds a verifier from a configuration and a key ring.
+    pub fn new(config: JwtConfig, keys: KeyRing) -> Self {
+        Self { config, keys }
+    }
+
+    /// The validation configuration.
+    pub fn config(&self) -> &JwtConfig {
+        &self.config
+    }
+
+    /// The signing keys.
+    pub fn keys(&self) -> &KeyRing {
+        &self.keys
+    }
+
+    /// Signs `claims`, always with the primary key.
+    ///
+    /// A signing failure is internal (the claims could not be serialized, or
+    /// the key was unusable); its detail stays in the error source for the
+    /// logs, never in the client's `message`.
+    pub fn encode<C: Serialize>(&self, claims: &C) -> Result<String, ApiError> {
+        let key = EncodingKey::from_secret(self.keys.primary.as_bytes());
+        encode(&Header::new(Algorithm::HS256), claims, &key).map_err(ApiError::internal)
+    }
+
+    /// Verifies `token` and returns its claims.
+    ///
+    /// The signature is checked against the primary key and then against the
+    /// retired ones, and the claims against the [`JwtConfig`]. Any rejection is
+    /// a 401 whose message is the catalog's
+    /// [`unauthorized`](crate::texts::Texts::unauthorized) text; the reason
+    /// stays in the error source, where it is logged.
+    pub fn decode<C: DeserializeOwned>(&self, token: &str) -> Result<C, ApiError> {
+        let validation = self.validation();
+        let mut failure = None;
+        for secret in self.keys.verification_keys() {
+            let key = DecodingKey::from_secret(secret.as_bytes());
+            match decode::<C>(token, &key, &validation) {
+                Ok(data) => return Ok(data.claims),
+                Err(err) => {
+                    failure.get_or_insert(err);
+                }
+            }
+        }
+        let unauthorized = ApiError::unauthorized(texts().unauthorized.clone());
+        match failure {
+            Some(err) => Err(unauthorized.with_source(err)),
+            // Unreachable: a key ring always holds at least the primary key.
+            None => Err(unauthorized),
+        }
+    }
+
+    /// An axum layer requiring a valid bearer token.
+    ///
+    /// Claims are inserted into the request extensions, so a handler reads
+    /// them with `Extension<C>`. Missing or invalid tokens are 401s.
+    pub fn layer<C>(&self) -> JwtAuthLayer
+    where
+        C: DeserializeOwned + Send + Sync + Clone + 'static,
+    {
+        middleware::from_fn_with_state(
+            self.clone(),
+            jwt_middleware::<C> as fn(State<JwtVerifier>, Request, Next) -> JwtAuthFuture,
+        )
+    }
+
+    /// An axum layer that authenticates when a bearer token is present.
+    ///
+    /// The extensions receive `Option<C>`: handlers read them with
+    /// `Extension<Option<C>>` and get `None` when the request carried no
+    /// `Authorization: Bearer …` header. A token that *is* present must be
+    /// valid — a malformed or expired one is a 401, never silently `None`.
+    pub fn optional_layer<C>(&self) -> OptionalJwtAuthLayer
+    where
+        C: DeserializeOwned + Send + Sync + Clone + 'static,
+    {
+        middleware::from_fn_with_state(
+            self.clone(),
+            optional_jwt_middleware::<C> as fn(State<JwtVerifier>, Request, Next) -> JwtAuthFuture,
+        )
+    }
+
+    /// The jsonwebtoken validation built from the configuration.
+    fn validation(&self) -> Validation {
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.leeway = self.config.leeway.as_secs();
+        validation.required_spec_claims = self
+            .config
+            .required_spec_claims
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        match &self.config.audience {
+            Some(audience) => validation.set_audience(std::slice::from_ref(audience)),
+            // jsonwebtoken rejects any token carrying an `aud` when an audience
+            // is configured but none was expected; leave `aud` unchecked when
+            // this deployment does not scope tokens by audience.
+            None => validation.validate_aud = false,
+        }
+        if let Some(issuer) = &self.config.issuer {
+            validation.set_issuer(std::slice::from_ref(issuer));
+        }
+        validation
+    }
+}
+
 /// Sign `claims` into a JWT using HS256 and the given shared secret.
+///
+/// Shorthand for [`JwtVerifier::encode`] with the default configuration and a
+/// single key; build a [`JwtVerifier`] when you need leeway, audience, issuer
+/// or key rotation.
 pub fn sign_token<T: Serialize>(claims: &T, secret: &str) -> Result<String, ApiError> {
-    let key = EncodingKey::from_secret(secret.as_bytes());
-    encode(&Header::new(Algorithm::HS256), claims, &key)
-        .map_err(|err| ApiError::bad_request(format!("failed to sign token: {err}")))
+    JwtVerifier::new(JwtConfig::default(), KeyRing::new(secret)).encode(claims)
 }
 
 /// Decode and validate `token` into claims of type `T`.
 ///
-/// Validation is pinned to HS256: a token whose header declares any other
-/// algorithm (for example RS256) is rejected, preventing algorithm-confusion
-/// attacks.
-///
-/// A rejected token is a 401 whose message is the catalog's
+/// Shorthand for [`JwtVerifier::decode`] with the default configuration and a
+/// single key. A rejected token is a 401 whose message is the catalog's
 /// [`unauthorized`](crate::texts::Texts::unauthorized) text; the reason stays
 /// in the error source, where it is logged.
 pub fn decode_token<T: DeserializeOwned>(token: &str, secret: &str) -> Result<T, ApiError> {
-    let key = DecodingKey::from_secret(secret.as_bytes());
-    let validation = Validation::new(Algorithm::HS256);
-    decode::<T>(token, &key, &validation)
-        .map(|data| data.claims)
-        .map_err(|err| ApiError::unauthorized(texts().unauthorized.clone()).with_source(err))
+    JwtVerifier::new(JwtConfig::default(), KeyRing::new(secret)).decode(token)
 }
 
-/// The boxed future returned by the JWT authentication middleware.
+/// The boxed future returned by the JWT authentication middlewares.
 pub type JwtAuthFuture = Pin<Box<dyn Future<Output = Result<Response, ApiError>> + Send + 'static>>;
 
-/// The layer returned by [`jwt_auth`].
+/// The layer returned by [`JwtVerifier::layer`] and [`jwt_auth`].
 pub type JwtAuthLayer = FromFnLayer<
-    fn(State<String>, Request, Next) -> JwtAuthFuture,
-    String,
-    (State<String>, Request),
+    fn(State<JwtVerifier>, Request, Next) -> JwtAuthFuture,
+    JwtVerifier,
+    (State<JwtVerifier>, Request),
 >;
+
+/// The layer returned by [`JwtVerifier::optional_layer`].
+///
+/// The same middleware shape as [`JwtAuthLayer`], kept as its own name so
+/// signatures say which contract a route opts into.
+pub type OptionalJwtAuthLayer = JwtAuthLayer;
 
 /// Extracts the bearer token from the `Authorization` header, if present.
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -59,15 +288,38 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     }
 }
 
-/// The middleware function backing [`jwt_auth`].
-fn jwt_middleware<T>(State(secret): State<String>, mut req: Request, next: Next) -> JwtAuthFuture
+/// The middleware function backing [`JwtVerifier::layer`].
+fn jwt_middleware<C>(
+    State(verifier): State<JwtVerifier>,
+    mut req: Request,
+    next: Next,
+) -> JwtAuthFuture
 where
-    T: DeserializeOwned + Send + Sync + Clone + 'static,
+    C: DeserializeOwned + Send + Sync + Clone + 'static,
 {
     Box::pin(async move {
         let token = bearer_token(req.headers())
             .ok_or_else(|| ApiError::unauthorized(texts().unauthorized.clone()))?;
-        let claims: T = decode_token(token, &secret)?;
+        let claims: C = verifier.decode(token)?;
+        req.extensions_mut().insert(claims);
+        Ok(next.run(req).await)
+    })
+}
+
+/// The middleware function backing [`JwtVerifier::optional_layer`].
+fn optional_jwt_middleware<C>(
+    State(verifier): State<JwtVerifier>,
+    mut req: Request,
+    next: Next,
+) -> JwtAuthFuture
+where
+    C: DeserializeOwned + Send + Sync + Clone + 'static,
+{
+    Box::pin(async move {
+        let claims: Option<C> = match bearer_token(req.headers()) {
+            Some(token) => Some(verifier.decode(token)?),
+            None => None,
+        };
         req.extensions_mut().insert(claims);
         Ok(next.run(req).await)
     })
@@ -102,10 +354,7 @@ pub fn jwt_auth<T>(secret: String) -> JwtAuthLayer
 where
     T: DeserializeOwned + Send + Sync + Clone + 'static,
 {
-    middleware::from_fn_with_state(
-        secret,
-        jwt_middleware::<T> as fn(State<String>, Request, Next) -> JwtAuthFuture,
-    )
+    JwtVerifier::new(JwtConfig::default(), KeyRing::new(secret)).layer::<T>()
 }
 
 #[cfg(test)]
@@ -114,119 +363,306 @@ mod tests {
     use axum::Extension;
     use axum::Router;
     use axum::body::Body;
-    use axum::http::{Request, StatusCode, header};
+    use axum::http::{Request, StatusCode};
     use axum::routing::get;
-    use base64::Engine as _;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use http_body_util::BodyExt;
-    use jsonwebtoken::get_current_timestamp;
-    use serde::{Deserialize, Serialize};
+    use serde::Deserialize;
     use tower::ServiceExt;
-
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    struct Claims {
-        sub: String,
-        exp: u64,
-    }
 
     const SECRET: &str = "test-secret";
 
-    fn fresh_claims(sub: &str) -> Claims {
-        Claims {
-            sub: sub.to_string(),
-            exp: get_current_timestamp() + 3600,
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct TestClaims {
+        sub: u64,
+        exp: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        aud: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        iss: Option<String>,
+    }
+
+    fn claims(exp: i64) -> TestClaims {
+        TestClaims {
+            sub: 7,
+            exp,
+            aud: None,
+            iss: None,
         }
     }
 
-    #[tokio::test]
-    async fn sign_decode_roundtrip() {
-        let claims = fresh_claims("alice");
-        let token = sign_token(&claims, SECRET).expect("sign token");
-        let decoded: Claims = decode_token(&token, SECRET).expect("decode token");
-        assert_eq!(decoded, claims);
+    fn future_exp() -> i64 {
+        jsonwebtoken::get_current_timestamp() as i64 + 3600
     }
 
-    #[tokio::test]
-    async fn expired_token_is_rejected() {
-        let claims = Claims {
-            sub: "bob".to_string(),
-            exp: get_current_timestamp() - 3600,
-        };
-        let token = sign_token(&claims, SECRET).expect("sign token");
-        let err = decode_token::<Claims>(&token, SECRET).expect_err("must reject expired token");
-        assert_eq!(err.kind(), crate::error::ErrorKind::Unauthorized);
+    fn verifier() -> JwtVerifier {
+        JwtVerifier::new(JwtConfig::default(), KeyRing::new(SECRET))
     }
 
-    #[tokio::test]
-    async fn rs256_token_is_rejected() {
-        // Craft a token whose header declares RS256 while still signing the
-        // payload with an HMAC shared secret. HS256-only validation must
-        // refuse it on the algorithm mismatch before trusting the signature.
-        let claims = fresh_claims("carol");
-        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
-        let payload =
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("serialize claims"));
-        let signing_input = format!("{header}.{payload}");
-        let signature = jsonwebtoken::crypto::sign(
-            signing_input.as_bytes(),
-            &EncodingKey::from_secret(SECRET.as_bytes()),
-            Algorithm::HS256,
-        )
-        .expect("sign signing input");
-        let token = format!("{signing_input}.{signature}");
-
-        let err = decode_token::<Claims>(&token, SECRET).expect_err("must reject RS256 token");
-        assert_eq!(err.kind(), crate::error::ErrorKind::Unauthorized);
+    async fn drive(app: Router, req: Request<Body>) -> (StatusCode, Response) {
+        let response = app.oneshot(req).await.expect("request succeeds");
+        (response.status(), response)
     }
 
-    #[tokio::test]
-    async fn jwt_auth_middleware_accepts_and_rejects() {
-        let app = Router::new()
+    fn req_with_bearer(token: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().uri("/me");
+        if let Some(token) = token {
+            builder = builder.header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        builder.body(Body::empty()).expect("request builds")
+    }
+
+    async fn body_text(response: Response) -> String {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        String::from_utf8(bytes.to_vec()).expect("utf-8 body")
+    }
+
+    fn claims_app(verifier: JwtVerifier) -> Router {
+        Router::new()
             .route(
                 "/me",
-                get(|Extension(claims): Extension<Claims>| async move { claims.sub }),
+                get(|Extension(claims): Extension<TestClaims>| async move {
+                    claims.sub.to_string()
+                }),
             )
-            .layer(jwt_auth::<Claims>(SECRET.to_string()));
+            .layer(verifier.layer::<TestClaims>())
+    }
 
-        // Valid token reaches the handler with claims in extensions.
-        let token = sign_token(&fresh_claims("alice"), SECRET).expect("sign token");
-        let req = Request::builder()
-            .uri("/me")
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .body(Body::empty())
-            .unwrap();
-        let response = app.clone().oneshot(req).await.expect("request succeeds");
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .expect("collect body")
-            .to_bytes();
-        assert_eq!(&bytes[..], b"alice");
+    #[test]
+    fn round_trip_returns_the_claims() {
+        let verifier = verifier();
+        let token = verifier.encode(&claims(future_exp())).expect("sign");
+        let decoded: TestClaims = verifier.decode(&token).expect("verify");
+        assert_eq!(decoded.sub, 7);
+    }
 
-        // Missing token → 401 with the numeric code.
-        let req = Request::builder().uri("/me").body(Body::empty()).unwrap();
-        let response = app.clone().oneshot(req).await.expect("request succeeds");
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .expect("collect body")
-            .to_bytes();
-        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("error body is json");
-        assert_eq!(body["code"], 401);
-        assert_eq!(body["message"], crate::texts::texts().unauthorized.as_ref());
+    #[test]
+    fn foreign_algorithm_is_rejected() {
+        // Signed correctly, but with a header that is not HS256: pinning the
+        // algorithm in the decoder is what rejects it.
+        let key = EncodingKey::from_secret(SECRET.as_bytes());
+        let token = encode(&Header::new(Algorithm::HS384), &claims(future_exp()), &key)
+            .expect("sign with another algorithm");
 
-        // Wrong secret / invalid token → 401.
-        let bad = sign_token(&fresh_claims("mallory"), "wrong-secret").expect("sign token");
-        let req = Request::builder()
-            .uri("/me")
-            .header(header::AUTHORIZATION, format!("Bearer {bad}"))
-            .body(Body::empty())
-            .unwrap();
-        let response = app.oneshot(req).await.expect("request succeeds");
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let error = verifier()
+            .decode::<TestClaims>(&token)
+            .expect_err("must reject");
+        assert_eq!(error.kind(), crate::error::ErrorKind::Unauthorized);
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn wrong_secret_is_unauthorized_with_the_catalog_message() {
+        let token = sign_token(&claims(future_exp()), "other-secret").expect("sign");
+        let error = verifier()
+            .decode::<TestClaims>(&token)
+            .expect_err("must reject");
+        assert_eq!(error.kind(), crate::error::ErrorKind::Unauthorized);
+        assert_eq!(error.message(), texts().unauthorized.as_ref());
+    }
+
+    #[test]
+    fn expiry_is_enforced_and_leeway_is_honoured() {
+        let verifier = verifier();
+        let now = jsonwebtoken::get_current_timestamp() as i64;
+
+        // Inside the 60s default leeway.
+        let recent = verifier.encode(&claims(now - 30)).expect("sign");
+        assert!(verifier.decode::<TestClaims>(&recent).is_ok());
+
+        // Well past it.
+        let old = verifier.encode(&claims(now - 3600)).expect("sign");
+        assert_eq!(
+            verifier
+                .decode::<TestClaims>(&old)
+                .expect_err("expired")
+                .kind(),
+            crate::error::ErrorKind::Unauthorized
+        );
+
+        // No leeway at all.
+        let strict = JwtVerifier::new(
+            JwtConfig {
+                leeway: Duration::ZERO,
+                ..JwtConfig::default()
+            },
+            KeyRing::new(SECRET),
+        );
+        assert!(strict.decode::<TestClaims>(&recent).is_err());
+    }
+
+    #[test]
+    fn previous_keys_verify_but_never_sign() {
+        let ring = KeyRing {
+            primary: "new-secret".to_string(),
+            previous: vec!["old-secret".to_string()],
+        };
+        let verifier = JwtVerifier::new(JwtConfig::default(), ring);
+        let claims = claims(future_exp());
+
+        let old_token = sign_token(&claims, "old-secret").expect("sign");
+        assert_eq!(
+            verifier
+                .decode::<TestClaims>(&old_token)
+                .expect("verifies")
+                .sub,
+            7
+        );
+
+        let new_token = verifier.encode(&claims).expect("sign");
+        assert!(verifier.decode::<TestClaims>(&new_token).is_ok());
+        // A ring without the retired key no longer accepts the old token.
+        let rotated = JwtVerifier::new(JwtConfig::default(), KeyRing::new("new-secret"));
+        assert!(rotated.decode::<TestClaims>(&old_token).is_err());
+    }
+
+    #[test]
+    fn audience_and_issuer_are_checked_when_configured() {
+        let scoped = JwtVerifier::new(
+            JwtConfig {
+                audience: Some("vivarium-api".to_string()),
+                issuer: Some("vivarium-auth".to_string()),
+                ..JwtConfig::default()
+            },
+            KeyRing::new(SECRET),
+        );
+
+        let good = scoped
+            .encode(&TestClaims {
+                aud: Some("vivarium-api".to_string()),
+                iss: Some("vivarium-auth".to_string()),
+                ..claims(future_exp())
+            })
+            .expect("sign");
+        assert!(scoped.decode::<TestClaims>(&good).is_ok());
+
+        let wrong_audience = scoped
+            .encode(&TestClaims {
+                aud: Some("someone-else".to_string()),
+                iss: Some("vivarium-auth".to_string()),
+                ..claims(future_exp())
+            })
+            .expect("sign");
+        assert!(scoped.decode::<TestClaims>(&wrong_audience).is_err());
+
+        let wrong_issuer = scoped
+            .encode(&TestClaims {
+                aud: Some("vivarium-api".to_string()),
+                iss: Some("someone-else".to_string()),
+                ..claims(future_exp())
+            })
+            .expect("sign");
+        assert!(scoped.decode::<TestClaims>(&wrong_issuer).is_err());
+    }
+
+    #[test]
+    fn an_unconfigured_audience_does_not_reject_aud_tokens() {
+        // The default config checks no audience, so a token that happens to
+        // carry one still verifies.
+        let token = verifier()
+            .encode(&TestClaims {
+                aud: Some("anything".to_string()),
+                ..claims(future_exp())
+            })
+            .expect("sign");
+        assert!(verifier().decode::<TestClaims>(&token).is_ok());
+    }
+
+    #[test]
+    fn required_spec_claims_make_a_claim_mandatory() {
+        let demanding = JwtVerifier::new(
+            JwtConfig {
+                required_spec_claims: vec!["exp".to_string(), "iss".to_string()],
+                ..JwtConfig::default()
+            },
+            KeyRing::new(SECRET),
+        );
+
+        let without_iss = demanding.encode(&claims(future_exp())).expect("sign");
+        assert!(demanding.decode::<TestClaims>(&without_iss).is_err());
+
+        let with_iss = demanding
+            .encode(&TestClaims {
+                iss: Some("vivarium-auth".to_string()),
+                ..claims(future_exp())
+            })
+            .expect("sign");
+        assert!(demanding.decode::<TestClaims>(&with_iss).is_ok());
+    }
+
+    #[tokio::test]
+    async fn layer_requires_a_token_and_injects_the_claims() {
+        let verifier = verifier();
+        let token = verifier.encode(&claims(future_exp())).expect("sign");
+
+        let (status, response) =
+            drive(claims_app(verifier.clone()), req_with_bearer(Some(&token))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body_text(response).await, "7");
+
+        let (status, response) = drive(claims_app(verifier.clone()), req_with_bearer(None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let json: serde_json::Value =
+            serde_json::from_str(&body_text(response).await).expect("error body is json");
+        assert_eq!(json["code"], 401);
+        assert_eq!(json["message"], texts().unauthorized.as_ref());
+
+        let (status, _) = drive(claims_app(verifier), req_with_bearer(Some("garbage"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn jwt_auth_free_function_still_authenticates() {
+        let token = sign_token(&claims(future_exp()), SECRET).expect("sign");
+        let app =
+            Router::new()
+                .route(
+                    "/me",
+                    get(|Extension(claims): Extension<TestClaims>| async move {
+                        claims.sub.to_string()
+                    }),
+                )
+                .layer(jwt_auth::<TestClaims>(SECRET.to_string()));
+
+        let (status, response) = drive(app, req_with_bearer(Some(&token))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body_text(response).await, "7");
+    }
+
+    #[tokio::test]
+    async fn optional_layer_distinguishes_absent_from_invalid() {
+        let verifier = verifier();
+        let token = verifier.encode(&claims(future_exp())).expect("sign");
+        let app = || {
+            Router::new()
+                .route(
+                    "/me",
+                    get(
+                        |Extension(claims): Extension<Option<TestClaims>>| async move {
+                            match claims {
+                                Some(claims) => claims.sub.to_string(),
+                                None => "anonymous".to_string(),
+                            }
+                        },
+                    ),
+                )
+                .layer(verifier.clone().optional_layer::<TestClaims>())
+        };
+
+        let (status, response) = drive(app(), req_with_bearer(None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body_text(response).await, "anonymous");
+
+        let (status, response) = drive(app(), req_with_bearer(Some(&token))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body_text(response).await, "7");
+
+        // A present but invalid token is a failure, not an anonymous request.
+        let (status, _) = drive(app(), req_with_bearer(Some("garbage"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }
