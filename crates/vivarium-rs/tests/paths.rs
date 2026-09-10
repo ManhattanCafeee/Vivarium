@@ -14,6 +14,9 @@ use vivarium_rs::{
     validation, varser,
 };
 
+// The JWT shorthands the README's prose writes out in full.
+use vivarium_rs::jwt::{decode_token, jwt_auth, sign_token};
+
 // Core vocabulary and the db layer, including the doc-hidden driver glue that a
 // bound written against `vivarium-db` needs.
 use vivarium_rs::{

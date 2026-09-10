@@ -26,6 +26,7 @@
 //! # Quick start (SQLite + axum)
 //!
 //! ```no_run
+//! # #[cfg(feature = "db-sqlite")] {
 //! use axum::{Router, routing::post};
 //! use serde::{Deserialize, Serialize};
 //! use validator::Validate;
@@ -80,6 +81,7 @@
 //!     .route("/users", post(create_user))
 //!     .with_state(pool);
 //! # Ok(())
+//! # }
 //! # }
 //! ```
 #![deny(missing_docs)]
@@ -136,6 +138,11 @@ pub use vivarium_config::{Config, ConfigError, ConfigOptions, ConfigWatcher, Han
 /// `cargo test --doc`, so the quick-start examples cannot drift from the API
 /// they document. `cfg(doctest)` keeps this item out of the rendered
 /// documentation — it exists only for the doctest collector.
-#[cfg(all(doctest, feature = "web", feature = "db", feature = "config"))]
+///
+/// The gate names `db-sqlite` because the snippets name `sqlx::sqlite`; the
+/// `include_str!` path is relative to `src/`, so it only resolves in a
+/// workspace checkout (a packaged crate lays the README out at the package
+/// root, where this item is not collected anyway).
+#[cfg(all(doctest, feature = "web", feature = "config", feature = "db-sqlite"))]
 #[doc = include_str!("../../../README.md")]
 struct ReadmeDoctests;

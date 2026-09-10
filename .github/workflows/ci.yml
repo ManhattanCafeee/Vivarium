@@ -83,20 +83,27 @@ jobs:
       - name: Path dependency versions match the workspace
         # `cargo publish` refuses a path dependency whose version requirement
         # does not resolve to the same crate, and that only surfaces at release
-        # time — so the requirements are checked here instead.
+        # time — so the requirements are checked here instead. `pipefail` matters:
+        # without it a failing `jq` would be masked by `tee`, and the step would
+        # pass while checking nothing.
         run: |
+          set -o pipefail
           cargo metadata --format-version 1 --no-deps > /tmp/metadata.json
           jq -r '
             .packages as $members
+            | ($members | map({ key: .name, value: .version }) | from_entries) as $versions
             | $members[]
             | . as $package
             | $package.dependencies[]
             | select(.path != null)
             | . as $dependency
-            | ($members[] | select(.name == $dependency.name) | .version) as $workspace
-            | select($workspace != null)
-            | select(($dependency.req | ltrimstr("^")) != $workspace)
-            | "\($package.name) requires \($dependency.name) \($dependency.req), but the workspace crate is \($workspace)"
+            | ($versions[$dependency.name]) as $workspace
+            | if $workspace == null
+              then "\($package.name): path dependency \($dependency.name) is not a workspace member"
+              elif ($dependency.req | ltrimstr("^")) != $workspace
+              then "\($package.name) requires \($dependency.name) \($dependency.req), but the workspace crate is \($workspace)"
+              else empty
+              end
           ' /tmp/metadata.json | tee /tmp/mismatch.txt
           test ! -s /tmp/mismatch.txt
       - name: Doc

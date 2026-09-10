@@ -83,13 +83,6 @@ async fn create_user(
     }))
 }
 
-# async fn migrations(pool: &SqlitePool) -> Result<(), sqlx::migrate::MigrateError> {
-#     // Stands in for the application's own `sqlx::migrate!("./migrations")`,
-#     // which needs a migration directory next to the crate that calls it.
-#     sqlx::migrate!("../vivarium-db/examples/migrations")
-#         .run(pool)
-#         .await
-# }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let pool = SqlitePoolOptions::new().connect("sqlite://app.db").await?;
@@ -97,7 +90,6 @@ async fn main() -> anyhow::Result<()> {
     // library-owned `_sqlx_migrations` table can never collide with yours.
     // Copy `vivarium-db/examples/migrations/` as a starting layout, then:
     //     sqlx::migrate!("./migrations").run(&pool).await?;
-    migrations(&pool).await?;
     let app = Router::new()
         .route("/users", post(create_user))
         .with_state(pool);
@@ -125,26 +117,38 @@ present, `errors` appears only for a failed validation, and `system` appears
 only for an internal error while debug mode is on (`VIVARIUM_DEBUG=1` or
 `vivarium_rs::install_debug_mode(true)`).
 
-### 2. Chainable queries
+### 2. The typed query layer
 
 ```rust,no_run
-use vivarium_rs::{Column, Order, Predicate, Query, Sorter};
+use vivarium_rs::{
+    Column, Entity, Expr, Order, Pagination, Predicate, Query, Sorter, Update, create,
+    with_transaction,
+};
 
-# #[derive(Clone, sqlx::FromRow, vivarium_rs::Entity)]
-# #[entity(table = "users")]
-# struct User {
-#     id: i64,
-#     name: String,
-# }
+// The table mapping: `#[derive(Entity)]` reads `id` as the primary key and the
+// field names as columns.
+#[derive(Clone, sqlx::FromRow, Entity)]
+#[entity(table = "users")]
+struct User {
+    id: i64,
+    name: String,
+    age: i32,
+}
+
+// The sorting/filtering whitelist: column names can only come from this enum.
 #[derive(Clone, Copy)]
 enum UserCol { Name, Age }
+
 impl Column for UserCol {
     fn name(&self) -> &'static str {
         match self { UserCol::Name => "name", UserCol::Age => "age" }
     }
 }
 
-async fn active_above(pool: &vivarium_rs::sqlx::sqlite::SqlitePool, age: i64) -> sqlx::Result<Vec<User>> {
+async fn active_above(
+    pool: &vivarium_rs::sqlx::sqlite::SqlitePool,
+    age: i32,
+) -> sqlx::Result<Vec<User>> {
     Query::<_, User>::new()
         .where_eq(UserCol::Age, age)          // closed Value bind: compile-time checked
         .filter(Predicate::starts_with(UserCol::Name, "ada"))
@@ -152,6 +156,34 @@ async fn active_above(pool: &vivarium_rs::sqlx::sqlite::SqlitePool, age: i64) ->
         .limit(50)
         .find(pool)
         .await
+}
+
+async fn first_page(pool: &vivarium_rs::sqlx::sqlite::SqlitePool) -> sqlx::Result<()> {
+    let page = Query::<_, User>::new()
+        .paginate(Pagination::new(2, 20), pool)
+        .await?;
+    // page.items, page.total, page.page, page.per_page, page.pages()
+    // out-of-range page/per_page values are normalized
+    let _ = (page.total, page.pages());
+    Ok(())
+}
+
+// Partial updates and transactions stay in the same typed layer.
+async fn rename_and_audit(pool: &vivarium_rs::sqlx::sqlite::SqlitePool) -> sqlx::Result<()> {
+    Update::<User, UserCol>::new(1_i64)
+        .set(UserCol::Name, "ada")
+        .execute(pool)
+        .await?;
+
+    with_transaction(pool, async |tx| {
+        create(&mut **tx, User { id: 0, name: "ada".into(), age: 36 }).await?;
+        Update::<User, UserCol>::new(1_i64)
+            .set_expr(UserCol::Name, Expr::Now)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    })
+    .await
 }
 ```
 
@@ -164,83 +196,26 @@ is impossible, and every value is bound. `Query` also offers `first`
 `raw_where(RawFragment)` as the explicit escape hatch (`?` is reserved for
 binds there).
 
-Partial updates and transactions stay in the same typed layer:
-
-```rust,no_run
-use vivarium_rs::{Column, Expr, Update, create, with_transaction};
-
-# #[derive(Clone, sqlx::FromRow, vivarium_rs::Entity)]
-# #[entity(table = "users")]
-# struct User {
-#     id: i64,
-#     name: String,
-# }
-# #[derive(Clone, Copy)]
-# enum UserCol { Name, Age }
-# impl Column for UserCol {
-#     fn name(&self) -> &'static str {
-#         match self { UserCol::Name => "name", UserCol::Age => "age" }
-#     }
-# }
-async fn example(pool: &vivarium_rs::sqlx::sqlite::SqlitePool) -> sqlx::Result<()> {
-Update::<User, UserCol>::new(1_i64)
-    .set(UserCol::Name, "ada")
-    .execute(pool)
-    .await?;
-
-with_transaction(pool, async |tx| {
-    create(&mut **tx, User { id: 0, name: "ada".into() }).await?;
-    Update::<User, UserCol>::new(1_i64)
-        .set_expr(UserCol::Name, Expr::Now)
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
-})
-.await?;
-Ok(())
-}
-```
-
-### 3. Pagination
-
-```rust,no_run
-use vivarium_rs::Query;
-
-# #[derive(Clone, sqlx::FromRow, vivarium_rs::Entity)]
-# #[entity(table = "users")]
-# struct User {
-#     id: i64,
-#     name: String,
-# }
-# async fn example(pool: vivarium_rs::sqlx::sqlite::SqlitePool) -> sqlx::Result<()> {
-let page = Query::<_, User>::new()
-    .paginate(vivarium_rs::Pagination::new(2, 20), &pool)
-    .await?;
-// page.items, page.total, page.page, page.per_page, page.pages()
-// out-of-range page/per_page values are normalized
-# Ok(())
-# }
-```
-
-### 4. JWT in three lines
+### 3. JWT in three lines
 
 ```rust,no_run
 use serde::{Deserialize, Serialize};
 use vivarium_rs::jwt::{decode_token, sign_token};
 
-# const SECRET: &str = "app-secret";
-# fn example() -> Result<(), Box<dyn std::error::Error>> {
+const SECRET: &str = "load this from the environment";
+
 #[derive(Serialize, Deserialize)]
 struct Claims {
     sub: u64,
     exp: i64,
 }
 
-let token = sign_token(&Claims { sub: 7, exp: 0 }, SECRET)?;
-let claims: Claims = decode_token(&token, SECRET)?;   // HS256 fixed; RS256 rejected
-# assert_eq!(claims.sub, 7);
-# Ok(())
-# }
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let token = sign_token(&Claims { sub: 7, exp: 0 }, SECRET)?;
+    let claims: Claims = decode_token(&token, SECRET)?;   // HS256 fixed; RS256 rejected
+    assert_eq!(claims.sub, 7);
+    Ok(())
+}
 ```
 
 Or as middleware: `.route_layer(vivarium_rs::jwt::jwt_auth::<Claims>(SECRET.into()))`
@@ -250,41 +225,36 @@ key ring that keeps retired secrets verifying through a rotation.
 
 [`JwtVerifier`]: https://docs.rs/vivarium-web/latest/vivarium_web/jwt/struct.JwtVerifier.html
 
-### 5. Sessions with a sliding TTL and an absolute cap
+### 4. Sessions with a sliding TTL and an absolute cap
 
 ```rust,no_run
 use std::time::Duration;
 use axum::{Router, routing::get};
-use vivarium_rs::{CookieOptions, SessionAuth, SessionCtx, session_layer};
+use vivarium_rs::{CookieOptions, SessionAuth, SessionCtx, SessionStore, session_layer};
 
-# use chrono::{DateTime, Utc};
-# use vivarium_rs::{ApiError, SessionId, SessionRecord, SessionStore};
-# #[derive(Clone, Default)]
-# struct MyStore;
-# impl SessionStore for MyStore {
-#     type UserId = u64;
-#     async fn create(&self, _id: &str, _user: u64, _created_at: DateTime<Utc>,
-#         _expires_at: DateTime<Utc>, _last_activity: DateTime<Utc>) -> Result<(), ApiError> { Ok(()) }
-#     async fn find(&self, _id: &str) -> Result<Option<SessionRecord<u64>>, ApiError> { Ok(None) }
-#     async fn touch(&self, _id: &str, _expires_at: DateTime<Utc>, _last_activity: DateTime<Utc>)
-#         -> Result<(), ApiError> { Ok(()) }
-#     async fn remove(&self, _id: &str) -> Result<bool, ApiError> { Ok(false) }
-#     async fn remove_by_user(&self, _user: u64) -> Result<u64, ApiError> { Ok(0) }
-# }
-# fn example() {
-let my_store = MyStore;                          // yours: the store is app-owned
-let auth = SessionAuth::new(
-    my_store,
-    CookieOptions::new("sid"),                   // Secure; HttpOnly; SameSite=Lax; Path=/
-    Duration::from_hours(24),                    // slides while the session is used
-    Some(Duration::from_hours(24 * 7)),          // absolute cap, never extended past
-);
-let app: Router = Router::new().route("/me", get(|SessionCtx { user_id }: SessionCtx<u64>| async move {
-    user_id.to_string()
-}))
-    .layer(session_layer(auth));
-# let _ = app;
-# }
+// `S` is your `SessionStore` implementation: the table is app-owned, and
+// `vivarium_web::session`'s module docs carry a complete in-memory store to
+// copy. It receives and returns the session's SHA-256 digest, never the value
+// the client holds.
+fn app_for<S>(store: S) -> Router
+where
+    S: SessionStore + Clone + Send + Sync + 'static,
+    // Only needed because this handler prints the id.
+    S::UserId: std::fmt::Display,
+{
+    let auth = SessionAuth::new(
+        store,
+        CookieOptions::new("sid"),               // Secure; HttpOnly; SameSite=Lax; Path=/
+        Duration::from_hours(24),                // slides while the session is used
+        Some(Duration::from_hours(24 * 7)),      // absolute cap, never extended past
+    );
+    Router::new()
+        .route(
+            "/me",
+            get(|SessionCtx { user_id }: SessionCtx<S::UserId>| async move { user_id.to_string() }),
+        )
+        .layer(session_layer(auth))
+}
 ```
 
 The middleware looks up the session by its SHA-256 digest (deleting dead
@@ -303,36 +273,36 @@ else — and `verify_and_upgrade(password, user_hash.as_deref(), Argon2Params::d
 which keeps the unknown-user path constant-time against username enumeration
 and reports when a stored hash should be upgraded.
 
-### 6. Hot-reloadable config
+### 5. Hot-reloadable config
 
 ```rust,no_run
 use std::sync::Arc;
 use vivarium_rs::{Config, ConfigOptions};
 
-# fn example() -> Result<(), Box<dyn std::error::Error>> {
 #[derive(serde::Deserialize, serde::Serialize)]
 struct AppConfig {
     port: u16,
 }
 
-let config = Arc::new(Config::load_with(
-    ConfigOptions::new("config.toml")
-        .defaults(&AppConfig { port: 8080 })   // 1. defaults
-        .file()                                // 2. config.toml (optional)
-        .env_prefixed("APP")                   // 3. APP__* variables
-        .separator("__"),
-)?);
-config.register(|cfg: &AppConfig| println!("port is now {}", cfg.port));
-config.on_error(|err| eprintln!("config error: {err}"));
-let watcher = Arc::clone(&config).watch()?;   // stops when the watcher drops
-let cfg = config.get();                       // lock-free Arc read
-# assert_eq!(cfg.port, 8080);
-# drop(watcher);
-# Ok(())
-# }
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Arc::new(Config::load_with(
+        ConfigOptions::new("config.toml")
+            .defaults(&AppConfig { port: 8080 })   // 1. defaults
+            .file()                                // 2. config.toml (optional)
+            .env_prefixed("APP")                   // 3. APP__* variables
+            .separator("__"),
+    )?);
+    config.register(|cfg: &AppConfig| println!("port is now {}", cfg.port));
+    config.on_error(|err| eprintln!("config error: {err}"));
+    let watcher = Arc::clone(&config).watch()?;    // stops when the watcher drops
+    let cfg = config.get();                        // lock-free Arc read
+    println!("listening on {}", cfg.port);
+    drop(watcher);
+    Ok(())
+}
 ```
 
-### 7. Validation errors and localization
+### 6. Validation errors and localization
 
 `Varser` rejects with `400` for malformed input and `422` for semantic
 validation failures, with a structured `errors` payload keyed by field:
