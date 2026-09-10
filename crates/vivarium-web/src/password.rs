@@ -6,7 +6,8 @@
 //! the lookup-aware wrapper: when no stored hash exists (unknown username), it
 //! verifies against an internal dummy hash so the "unknown user" and "wrong
 //! password" paths take the same Argon2 time, defeating username-enumeration
-//! timing side channels.
+//! timing side channels — exactly while the stored rows use the parameters the
+//! dummy is hashed with (see [`DUMMY_HASH`](self)).
 //!
 //! Password parameters age: hardware gets faster and recommendations move.
 //! [`verify_and_upgrade`] does the whole login in one call — verify, then
@@ -38,11 +39,25 @@ use crate::error::ApiError;
 /// The password hashed into [`DUMMY_HASH`]; its value is never a real password.
 const DUMMY_PASSWORD: &str = "vivarium-timing-dummy";
 
+/// The PHC algorithm identifier this crate hashes with.
+const ALGORITHM_ID: &str = "argon2id";
+
+/// The Argon2 version this crate hashes with, as written in a PHC string
+/// (`v=19`, i.e. 0x13).
+const VERSION: u32 = 19;
+
 /// Cached dummy PHC string verified against when no stored hash exists.
 ///
 /// Computed on first use; a failure to hash a constant cannot be cloned out of
 /// a stored [`ApiError`], so the failure's detail is cached instead and turned
 /// back into a fresh error on the (unreachable in practice) path that needs it.
+///
+/// It carries the current [`Argon2Params::default`] cost, so the dummy verify
+/// costs exactly what a row hashed with the recommended profile costs. A store
+/// whose rows still use weaker parameters makes the unknown-user path *more*
+/// expensive than its wrong-password path, so login latency can still separate
+/// "no such user" from "wrong password" for those rows — use
+/// [`verify_and_upgrade`] to retire them.
 static DUMMY_HASH: LazyLock<Result<String, String>> = LazyLock::new(|| {
     hash(DUMMY_PASSWORD).map_err(|error| {
         error
@@ -139,14 +154,18 @@ pub fn hash_with(password: &str, params: Argon2Params) -> Result<String, ApiErro
 
 /// Verifies `password` against `stored_hash` (a PHC string from [`hash`]).
 ///
-/// Returns `Ok(false)` for a mismatch; a malformed `stored_hash` is
-/// `Err(ApiError::internal)` — it indicates corruption, not a failed login. The
-/// detail stays in the error source for the logs.
+/// Returns `Ok(false)` only for a wrong password. A `stored_hash` that cannot
+/// be parsed *or* whose parameters argon2 refuses is `Err(ApiError::internal)`
+/// — that is corruption, not a failed login, and it must not masquerade as one
+/// (the user would be locked out with no trace). The detail stays in the error
+/// source for the logs.
 pub fn verify(password: &str, stored_hash: &str) -> Result<bool, ApiError> {
     let parsed = parse(stored_hash)?;
-    Ok(Argon2::default()
-        .verify_password(password.as_bytes(), &parsed)
-        .is_ok())
+    match Argon2::default().verify_password(password.as_bytes(), &parsed) {
+        Ok(()) => Ok(true),
+        Err(argon2::password_hash::Error::Password) => Ok(false),
+        Err(err) => Err(ApiError::internal(err)),
+    }
 }
 
 /// Verifies a login attempt, keeping the "no such user" path constant-time
@@ -168,15 +187,22 @@ pub fn verify_login(password: &str, stored_hash: Option<&str>) -> Result<bool, A
 
 /// Whether `stored_hash` is weaker than `params`.
 ///
-/// Only the cost parameters are compared: the algorithm and version are fixed
-/// (Argon2id v19), and the salt and output length are not aging. A malformed
-/// hash is `Err(ApiError::internal)`, like [`verify`].
+/// Only a stored hash that is weaker in some cost parameter is flagged, never
+/// one that is stronger: rewriting a stronger hash with the application's
+/// parameters would silently *lower* that credential's cost. The algorithm and
+/// version are compared as well, since a row from an Argon2i or pre-v19 system
+/// verifies correctly and would otherwise never be upgraded; the salt and the
+/// output length do not age. A malformed hash is `Err(ApiError::internal)`,
+/// like [`verify`].
 pub fn needs_rehash(stored_hash: &str, params: Argon2Params) -> Result<bool, ApiError> {
     let parsed = parse(stored_hash)?;
+    if parsed.algorithm.as_str() != ALGORITHM_ID || parsed.version != Some(VERSION) {
+        return Ok(true);
+    }
     let current = Params::try_from(&parsed).map_err(ApiError::internal)?;
-    Ok(current.m_cost() != params.m_cost
-        || current.t_cost() != params.t_cost
-        || current.p_cost() != params.p_cost)
+    Ok(current.m_cost() < params.m_cost
+        || current.t_cost() < params.t_cost
+        || current.p_cost() < params.p_cost)
 }
 
 /// Verifies a login and, when the stored hash has aged, re-hashes it.
@@ -321,5 +347,69 @@ mod tests {
         let err = verify_login("x", Some("not-a-phc-string")).expect_err("must reject");
         assert_eq!(err.kind(), crate::error::ErrorKind::Internal);
         assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn stronger_hashes_are_left_alone() {
+        let strong = hash_with(
+            "hunter2",
+            Argon2Params {
+                m_cost: 65_536,
+                t_cost: 4,
+                p_cost: 2,
+            },
+        )
+        .expect("hash succeeds");
+
+        // A login with the application's weaker profile must not downgrade it.
+        assert!(!needs_rehash(&strong, Argon2Params::default()).expect("inspects"));
+        assert_eq!(
+            verify_and_upgrade("hunter2", Some(&strong), Argon2Params::default()).expect("verify"),
+            VerifyOutcome::Valid
+        );
+    }
+
+    #[test]
+    fn another_algorithm_or_version_is_flagged_for_rehash() {
+        // Same shape and costs, but not the Argon2id/v19 profile this crate
+        // hashes with: such a row verifies and would otherwise never upgrade.
+        let hashed = hash("pw").expect("hash succeeds");
+
+        let argon2i = hashed.replacen("$argon2id$", "$argon2i$", 1);
+        assert!(needs_rehash(&argon2i, Argon2Params::default()).expect("inspects"));
+
+        let old_version = hashed.replacen("$v=19$", "$v=16$", 1);
+        assert!(needs_rehash(&old_version, Argon2Params::default()).expect("inspects"));
+    }
+
+    #[test]
+    fn parameters_argon2_refuses_are_internal_not_a_wrong_password() {
+        // Below argon2's minimum memory cost: the PHC string parses, so only
+        // the parameter conversion can reject it. Reporting that as "wrong
+        // password" would lock the user out with no trace.
+        let rejected = hash("pw")
+            .expect("hash succeeds")
+            .replacen("m=19456", "m=4", 1);
+
+        let err = verify("anything", &rejected).expect_err("must not be a wrong password");
+        assert_eq!(err.kind(), crate::error::ErrorKind::Internal);
+        assert!(needs_rehash(&rejected, Argon2Params::default()).is_err());
+        assert_eq!(
+            verify_and_upgrade("anything", Some(&rejected), Argon2Params::default())
+                .expect_err("must not be a wrong password")
+                .kind(),
+            crate::error::ErrorKind::Internal
+        );
+    }
+
+    #[test]
+    fn verify_outcome_debug_redacts_the_new_hash() {
+        let upgraded = hash("hunter2").expect("hash succeeds");
+        let outcome = VerifyOutcome::ValidNeedsRehash(upgraded.clone());
+        let printed = format!("{outcome:?}");
+
+        assert!(!printed.contains(&upgraded), "{printed}");
+        assert_eq!(printed, "ValidNeedsRehash(<redacted>)");
+        assert_eq!(format!("{:?}", VerifyOutcome::Valid), "Valid");
     }
 }

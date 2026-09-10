@@ -168,6 +168,13 @@ pub trait AccessClaims<U> {
 /// `extra` is flattened into the JWT itself, so a token stays self-describing
 /// without a bespoke struct; a bespoke struct is faster and type-safe when the
 /// claims are fixed.
+///
+/// The four names the struct itself owns — `sub`, `exp`, `iat`, `jti` — and
+/// `scope` are reserved: an entry under one of those names would be serialized
+/// *in addition* to the typed field, producing a token that carries the claim
+/// twice. [`AccessClaims`] strips `sub`/`exp`/`iat` when the manager stamps
+/// them, so a caller cannot smuggle a subject or a lifetime through `extra`;
+/// `jti` and `scope` have no setter and must not be put into `extra`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Claims<U = i64> {
     /// The subject: the user the token was issued to.
@@ -182,7 +189,8 @@ pub struct Claims<U = i64> {
     /// Permission codes carried by the token.
     #[serde(default)]
     pub scope: Vec<String>,
-    /// Any further claims, flattened into the token.
+    /// Any further claims, flattened into the token. Reserved names must not
+    /// appear here — see the type-level notes.
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -192,16 +200,28 @@ impl<U: Clone> AccessClaims<U> for Claims<U> {
         self.sub.clone()
     }
 
+    /// Writes `sub`, dropping any `extra["sub"]` the caller supplied: the
+    /// flattened map would otherwise serialize a second, caller-chosen subject
+    /// next to this one.
     fn set_subject(&mut self, sub: U) {
         self.sub = sub;
+        self.extra.remove("sub");
     }
 
+    /// Writes `exp`, dropping any `extra["exp"]` (see [`set_subject`]).
+    ///
+    /// [`set_subject`]: AccessClaims::set_subject
     fn set_expiry(&mut self, exp: i64) {
         self.exp = exp;
+        self.extra.remove("exp");
     }
 
+    /// Writes `iat`, dropping any `extra["iat"]` (see [`set_subject`]).
+    ///
+    /// [`set_subject`]: AccessClaims::set_subject
     fn set_issued_at(&mut self, iat: i64) {
         self.iat = iat;
+        self.extra.remove("iat");
     }
 }
 
@@ -346,7 +366,7 @@ impl<S: RefreshTokenStore> RefreshTokenManager<S> {
 }
 
 /// A freshly issued access + refresh pair.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TokenPair {
     /// The HS256 access token, signed with the manager's secret.
     pub access_token: String,
@@ -354,6 +374,18 @@ pub struct TokenPair {
     pub refresh_token: String,
     /// The access token's lifetime in seconds, for the client's `expires_in`.
     pub expires_in: u64,
+}
+
+impl std::fmt::Debug for TokenPair {
+    /// Prints the shape of the pair, not the credentials: both strings are
+    /// bearer tokens, so a `{:?}` in a log or a span must not reveal them.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenPair")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// The 401 every rejected refresh token produces.
@@ -383,7 +415,7 @@ mod tests {
 
     type Store = Arc<Mutex<std::collections::HashMap<String, RefreshTokenRecord<u64>>>>;
 
-    #[derive(Clone, Default)]
+    #[derive(Clone, Default, Debug)]
     struct InMemoryTokenStore(Store);
 
     impl InMemoryTokenStore {
@@ -582,5 +614,114 @@ mod tests {
 
         assert_eq!(manager.revoke_all(7).await.expect("revoke"), 2);
         assert_eq!(store.keys().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_lost_delete_race_is_rejected_without_issuing() {
+        /// Reports the record on lookup, but deletes nothing: the store
+        /// behaviour behind a concurrent rotation winning the race.
+        #[derive(Clone)]
+        struct LostRaceStore(InMemoryTokenStore);
+
+        impl RefreshTokenStore for LostRaceStore {
+            type UserId = u64;
+
+            async fn insert(
+                &self,
+                token_hash: &str,
+                user: u64,
+                expires_at: DateTime<Utc>,
+            ) -> Result<(), ApiError> {
+                self.0.insert(token_hash, user, expires_at).await
+            }
+
+            async fn lookup(
+                &self,
+                token_hash: &str,
+            ) -> Result<Option<RefreshTokenRecord<u64>>, ApiError> {
+                self.0.lookup(token_hash).await
+            }
+
+            async fn remove(&self, _token_hash: &str) -> Result<bool, ApiError> {
+                Ok(false)
+            }
+
+            async fn remove_by_user(&self, user: u64) -> Result<u64, ApiError> {
+                self.0.remove_by_user(user).await
+            }
+        }
+
+        let store = InMemoryTokenStore::default();
+        store.insert_record(
+            &hash_token("raced"),
+            RefreshTokenRecord {
+                user_id: 7,
+                expires_at: Utc::now() + TimeDelta::seconds(60),
+            },
+        );
+        let manager = RefreshTokenManager::new(
+            LostRaceStore(store.clone()),
+            SECRET,
+            ACCESS_TTL,
+            REFRESH_TTL,
+        );
+
+        let error = manager
+            .rotate("raced", |_| async { Ok(claims(0)) })
+            .await
+            .expect_err("losing the delete race must be rejected");
+        assert_eq!(error.kind(), crate::error::ErrorKind::Unauthorized);
+        assert_eq!(
+            store.keys(),
+            vec![hash_token("raced")],
+            "a rejected rotation must not store a new token"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_manager_overrides_reserved_claims_smuggled_through_extra() {
+        let store = InMemoryTokenStore::default();
+        let manager = manager(store);
+        let mut hostile = claims(0);
+        hostile
+            .extra
+            .insert("sub".to_string(), serde_json::json!(999));
+        hostile
+            .extra
+            .insert("exp".to_string(), serde_json::json!(1));
+        hostile
+            .extra
+            .insert("iat".to_string(), serde_json::json!(1));
+        hostile
+            .extra
+            .insert("role".to_string(), serde_json::json!("admin"));
+
+        let pair = manager.issue(&mut hostile, 7).await.expect("issue");
+
+        // One value per claim: a duplicate would make the token undecodable
+        // (or, for a last-wins parser, hand the caller someone else's subject).
+        let decoded: Claims<u64> = decode_token(&pair.access_token, SECRET).expect("decodes");
+        assert_eq!(decoded.sub, 7);
+        assert_eq!(decoded.exp, decoded.iat + ACCESS_TTL.as_secs() as i64);
+        assert_eq!(decoded.extra.get("role"), Some(&serde_json::json!("admin")));
+        assert!(!decoded.extra.contains_key("sub"));
+    }
+
+    #[test]
+    fn debug_output_never_carries_credentials() {
+        let manager = manager(InMemoryTokenStore::default());
+        let printed = format!("{manager:?}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+        assert!(!printed.contains(SECRET), "{printed}");
+
+        let pair = TokenPair {
+            access_token: "an-access-token".to_string(),
+            refresh_token: "a-refresh-token".to_string(),
+            expires_in: 900,
+        };
+        let printed = format!("{pair:?}");
+        assert!(!printed.contains("an-access-token"), "{printed}");
+        assert!(!printed.contains("a-refresh-token"), "{printed}");
+        assert!(printed.contains("expires_in: 900"), "{printed}");
     }
 }

@@ -32,7 +32,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`hash_token`, `hash_with`, `needs_rehash`, `verify_and_upgrade`),
   `Argon2Params`, `VerifyOutcome`, `AccessClaims`, `Claims`, `SessionId`,
   `CookieOptions`, `SameSite`, `CacheControl`, `JwtConfig`, `JwtVerifier`,
-  `KeyRing`, `serve_with_shutdown`, and `shutdown_signal`.
+  `KeyRing`, `should_extend`, `serve_with_shutdown`, and `shutdown_signal`.
 
 ### Documentation
 

@@ -49,7 +49,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gained `expires_in`, and `AccessClaims` gained `set_subject`.
 - `jwt`: `sign_token`/`decode_token`/`jwt_auth` keep their signatures but are
   now shorthands over `JwtVerifier`; `Cache` is gone in favour of
-  `CacheControl` (see below).
+  `CacheControl` (see below). A signing failure is now a `500` internal with
+  the detail only in the error source — it used to be a `400` whose message
+  repeated the serializer error.
+- `JwtConfig` also enforces `nbf` (jsonwebtoken leaves it off by default), and
+  a configured `audience`/`issuer` now *requires* the claim: a token that omits
+  it is rejected instead of skipping the check.
+- `SessionAuth::expires_at()` and `cookie_name()` are gone
+  (`cookie()` returns the whole `CookieOptions`); `set_cookie_value` takes a
+  `&SessionId`; `end` returns `()` and `end_for_user` the number of deleted
+  rows, as do `RefreshTokenStore::remove` (`bool`) and `remove_by_user`/`revoke_all` (`u64`).
 - `cache::Cache { seconds }` → `CacheControl::{Public, Private, NoCache,
   NoStore}.layer()`; the layer no longer overwrites an existing
   `Cache-Control` and never stamps a 4xx/5xx response (a 401 used to be

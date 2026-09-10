@@ -32,6 +32,7 @@ utoipa = ["vivarium-core/utoipa", "vivarium-web?/utoipa"]
 # `openapi::mount`: serves the spec plus Scalar and Swagger UI.
 utoipa-ui = ["utoipa", "vivarium-web?/utoipa-ui"]
 # `vivarium_web::serve::telemetry::init`: stdout plus optional JSON log files.
+# Like the other `vivarium-web` features this is inert without `web`.
 telemetry = ["vivarium-web?/telemetry"]
 
 [dependencies]

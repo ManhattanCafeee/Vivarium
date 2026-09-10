@@ -47,7 +47,6 @@ utoipa = { version = "5.5", optional = true, features = ["axum_extras"] }
 utoipa-axum = { version = "0.2", optional = true }
 utoipa-scalar = { version = "0.3", optional = true, features = ["axum"] }
 utoipa-swagger-ui = { version = "9", optional = true, features = ["axum", "vendored"] }
-uuid = { version = "1.26.0", features = ["v4"] }
 validator = { version = "0.20", optional = true, features = ["derive"] }
 
 [dev-dependencies]

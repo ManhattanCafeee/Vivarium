@@ -144,6 +144,7 @@ mod tests {
         assert_eq!(texts.not_found, "not found");
         assert_eq!(texts.conflict, "conflict");
         assert_eq!(texts.too_many_requests, "too many requests");
+        assert_eq!(texts.invalid_refresh, "invalid or expired refresh token");
         assert_eq!(texts.internal, "internal error");
         assert_eq!(texts.database, "database error");
         assert!(!texts.echo_details);
@@ -161,6 +162,7 @@ mod tests {
             &texts.not_found,
             &texts.conflict,
             &texts.too_many_requests,
+            &texts.invalid_refresh,
             &texts.internal,
             &texts.database,
         ] {

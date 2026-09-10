@@ -2,11 +2,13 @@
 //! optional telemetry initializer.
 //!
 //! [`serve`] and [`serve_with_shutdown`] are thin wrappers over
-//! [`axum::serve()`] that return its [`io::Result`] rather than panicking: the
-//! caller decides how to surface a bind or accept failure, in keeping with the
-//! library's no-panic rule. [`shutdown_signal`] resolves on the signals a
-//! process is actually stopped with — `Ctrl-C`, and `SIGTERM` on Unix, which is
-//! what a container runtime sends.
+//! [`axum::serve()`] that return its [`io::Result`] rather than panicking, in
+//! keeping with the library's no-panic rule. Both take an already-bound
+//! listener, so a bind failure is the caller's to report; what happens *after*
+//! the bind (a failed `accept`) is handled by axum itself, which logs the error
+//! and retries. [`shutdown_signal`] resolves on the signals a process is
+//! actually stopped with — `Ctrl-C`, and `SIGTERM` on Unix, which is what a
+//! container runtime sends.
 //!
 //! ```no_run
 //! # async fn example() -> std::io::Result<()> {
@@ -36,8 +38,6 @@ use tokio::net::TcpListener;
 /// This is a thin wrapper over [`axum::serve()`] that returns its [`io::Result`]
 /// rather than panicking.
 ///
-/// # Example
-///
 /// ```no_run
 /// # async fn example() -> std::io::Result<()> {
 /// use axum::{Router, routing::get};
@@ -57,10 +57,10 @@ pub async fn serve(listener: TcpListener, app: Router) -> io::Result<()> {
 /// requests.
 ///
 /// Pass [`shutdown_signal()`] for the usual process behaviour, or a channel
-/// receiver when something else decides when to stop (a test, a supervisor, a
-/// maintenance task).
-///
-/// # Example
+/// receiver when something else decides when to stop (a supervisor, a
+/// maintenance task, a test). The future is owned by the server task, so the
+/// end that *triggers* the shutdown — a [`oneshot::Sender`] — belongs outside
+/// it:
 ///
 /// ```no_run
 /// # async fn example() -> std::io::Result<()> {
@@ -72,14 +72,18 @@ pub async fn serve(listener: TcpListener, app: Router) -> io::Result<()> {
 /// let listener = TcpListener::bind("0.0.0.0:8080").await?;
 ///
 /// let (stop, wait) = tokio::sync::oneshot::channel::<()>();
-/// serve_with_shutdown(listener, app, async move {
+/// let server = tokio::spawn(serve_with_shutdown(listener, app, async move {
 ///     let _ = wait.await;
-///     // `stop` is dropped here, but a real program keeps it to signal later.
-///     drop(stop);
-/// })
-/// .await
+/// }));
+///
+/// // … later, from wherever the decision is made:
+/// stop.send(()).map_err(|()| std::io::Error::other("server stopped"))?;
+/// server.await.map_err(std::io::Error::other)??;
+/// # Ok(())
 /// # }
 /// ```
+///
+/// [`oneshot::Sender`]: tokio::sync::oneshot::Sender
 pub async fn serve_with_shutdown(
     listener: TcpListener,
     app: Router,
@@ -206,6 +210,16 @@ pub mod telemetry {
             #[source]
             source: tracing_subscriber::filter::ParseError,
         },
+        /// The JSON log file could not be opened (a missing or read-only
+        /// directory, a path that is not a directory).
+        #[error("could not open the JSON log file `{path}`")]
+        File {
+            /// The configured path.
+            path: PathBuf,
+            /// The appender's complaint.
+            #[source]
+            source: tracing_appender::rolling::InitError,
+        },
         /// A global subscriber was already installed (by this call earlier, or
         /// by the application).
         #[error("a global tracing subscriber is already installed")]
@@ -217,7 +231,8 @@ pub mod telemetry {
     /// # Errors
     ///
     /// Returns [`TelemetryError::Filter`] when `level` is not a valid filter
-    /// directive, and [`TelemetryError::AlreadyInstalled`] when a global
+    /// directive, [`TelemetryError::File`] when the JSON log file cannot be
+    /// opened, and [`TelemetryError::AlreadyInstalled`] when a global
     /// subscriber already exists — including a second call, since one process
     /// has one global subscriber.
     pub fn init(options: TelemetryOptions) -> Result<TelemetryGuard, TelemetryError> {
@@ -242,7 +257,17 @@ pub mod telemetry {
                     || "vivarium".to_string(),
                     |name| name.to_string_lossy().into(),
                 );
-                let appender = tracing_appender::rolling::daily(directory, prefix);
+                // The free `rolling::daily` panics when the file cannot be
+                // opened; the builder reports it, which is what a function
+                // returning a `Result` owes its caller.
+                let appender = tracing_appender::rolling::RollingFileAppender::builder()
+                    .rotation(tracing_appender::rolling::Rotation::DAILY)
+                    .filename_prefix(prefix)
+                    .build(directory)
+                    .map_err(|source| TelemetryError::File {
+                        path: path.clone(),
+                        source,
+                    })?;
                 let (writer, guard) = tracing_appender::non_blocking(appender);
                 (Some(writer), Some(guard))
             }
@@ -359,6 +384,29 @@ mod tests {
         ));
 
         std::fs::remove_dir_all(&directory).expect("clean up the temp directory");
+    }
+
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn telemetry_reports_an_unopenable_log_file() {
+        use super::telemetry::{TelemetryError, TelemetryOptions, init};
+
+        // A regular file where the directory should be: the appender cannot be
+        // created, and `init` must say so instead of panicking (a `Result` that
+        // aborts the process is not a `Result`).
+        let blocker =
+            std::env::temp_dir().join(format!("vivarium-telemetry-blocker-{}", std::process::id()));
+        std::fs::write(&blocker, b"not a directory").expect("write the blocker file");
+
+        let error = init(TelemetryOptions {
+            level: Some("info".to_string()),
+            json_file: Some(blocker.join("app.json")),
+            ansi: false,
+        })
+        .expect_err("the log file cannot be opened");
+        assert!(matches!(error, TelemetryError::File { .. }), "{error:?}");
+
+        std::fs::remove_file(&blocker).expect("clean up the blocker file");
     }
 
     #[cfg(feature = "telemetry")]

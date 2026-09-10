@@ -58,21 +58,32 @@ use crate::error::ApiError;
 use crate::texts::texts;
 use crate::varser::get_authorization;
 
+/// The largest clock skew a [`JwtConfig`] may ask for.
+///
+/// jsonwebtoken compares expiry as `now - leeway` on `u64` without saturating,
+/// so an unbounded value would overflow; a day is already far beyond any real
+/// skew (and effectively means "ignore `exp`").
+const MAX_LEEWAY: Duration = Duration::from_secs(24 * 3600);
+
 /// How a [`JwtVerifier`] validates a token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JwtConfig {
-    /// Clock skew tolerated on `exp` (and `nbf`), in seconds.
+    /// Clock skew tolerated on `exp` and `nbf`, in seconds, capped at 24 hours
+    /// (a larger value is clamped, since it would overflow jsonwebtoken's own
+    /// expiry arithmetic).
     pub leeway: Duration,
-    /// The required `aud`, when the deployment issues audience-scoped tokens.
+    /// The `aud` every token must carry and match.
     ///
     /// `None` disables the audience check entirely, so tokens carrying any (or
-    /// no) `aud` verify; `Some` requires the tokens' `aud` to match. Add
-    /// `"aud"` to [`required_spec_claims`](Self::required_spec_claims) to make
-    /// the claim mandatory rather than merely checked.
+    /// no) `aud` verify. `Some` both requires the claim to be present and
+    /// compares it, so a token minted for another audience — or one that omits
+    /// `aud` altogether — is rejected.
     pub audience: Option<String>,
-    /// The required `iss`, when tokens are issued by several parties.
+    /// The `iss` every token must carry and match, with the same semantics as
+    /// [`audience`](Self::audience): `Some` makes the claim required.
     pub issuer: Option<String>,
-    /// Registered claims that must be present. Defaults to `["exp"]`.
+    /// Registered claims that must be present, on top of `exp` and of any
+    /// `aud`/`iss` required through the fields above. Defaults to `["exp"]`.
     pub required_spec_claims: Vec<String>,
 }
 
@@ -222,7 +233,14 @@ impl JwtVerifier {
     /// The jsonwebtoken validation built from the configuration.
     fn validation(&self) -> Validation {
         let mut validation = Validation::new(Algorithm::HS256);
-        validation.leeway = self.config.leeway.as_secs();
+        // jsonwebtoken's own arithmetic is not saturating, so an absurd leeway
+        // would overflow its expiry comparison in a debug build (and turn every
+        // token into an expired one in a release build). A day is already far
+        // beyond any real clock skew.
+        validation.leeway = self.config.leeway.as_secs().min(MAX_LEEWAY.as_secs());
+        // `nbf` carries the "not before" semantics of RFC 7519; the default
+        // jsonwebtoken validation leaves it unenforced.
+        validation.validate_nbf = true;
         validation.required_spec_claims = self
             .config
             .required_spec_claims
@@ -230,7 +248,13 @@ impl JwtVerifier {
             .cloned()
             .collect::<HashSet<_>>();
         match &self.config.audience {
-            Some(audience) => validation.set_audience(std::slice::from_ref(audience)),
+            Some(audience) => {
+                validation.set_audience(std::slice::from_ref(audience));
+                // A configured audience means the claim must be there at all:
+                // jsonwebtoken only compares a claim that is present, so
+                // without this a token that simply omits `aud` would pass.
+                validation.required_spec_claims.insert("aud".to_string());
+            }
             // jsonwebtoken rejects any token carrying an `aud` when an audience
             // is configured but none was expected; leave `aud` unchecked when
             // this deployment does not scope tokens by audience.
@@ -238,6 +262,7 @@ impl JwtVerifier {
         }
         if let Some(issuer) = &self.config.issuer {
             validation.set_issuer(std::slice::from_ref(issuer));
+            validation.required_spec_claims.insert("iss".to_string());
         }
         validation
     }
@@ -515,8 +540,13 @@ mod tests {
 
         let new_token = verifier.encode(&claims).expect("sign");
         assert!(verifier.decode::<TestClaims>(&new_token).is_ok());
-        // A ring without the retired key no longer accepts the old token.
+        // A ring without the retired key accepts the new token and rejects the
+        // old one: `encode` signs with `primary` only.
         let rotated = JwtVerifier::new(JwtConfig::default(), KeyRing::new("new-secret"));
+        assert!(
+            rotated.decode::<TestClaims>(&new_token).is_ok(),
+            "a freshly signed token must verify under the primary key alone"
+        );
         assert!(rotated.decode::<TestClaims>(&old_token).is_err());
     }
 
@@ -557,6 +587,54 @@ mod tests {
             })
             .expect("sign");
         assert!(scoped.decode::<TestClaims>(&wrong_issuer).is_err());
+
+        // A token that simply omits the required claims must not slip through:
+        // jsonwebtoken only compares a claim that is present.
+        let without_audience = scoped.encode(&claims(future_exp())).expect("sign");
+        assert!(scoped.decode::<TestClaims>(&without_audience).is_err());
+    }
+
+    #[test]
+    fn not_before_is_enforced_with_the_configured_leeway() {
+        let verifier = verifier();
+        let now = jsonwebtoken::get_current_timestamp() as i64;
+        let token = |nbf: i64| {
+            verifier
+                .encode(&serde_json::json!({
+                    "sub": 7,
+                    "exp": now + 3600,
+                    "nbf": nbf,
+                }))
+                .expect("sign")
+        };
+
+        assert!(
+            verifier.decode::<TestClaims>(&token(now - 10)).is_ok(),
+            "a token that is already valid must pass"
+        );
+        assert!(
+            verifier.decode::<TestClaims>(&token(now + 3600)).is_err(),
+            "a token that is not valid yet must be rejected"
+        );
+    }
+
+    #[test]
+    fn a_signing_failure_is_an_internal_error_without_the_detail() {
+        /// Claims that refuse to serialize, whatever the serializer.
+        struct Unserializable;
+
+        impl Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("the claims cannot be encoded"))
+            }
+        }
+
+        let error = verifier()
+            .encode(&Unserializable)
+            .expect_err("claims that cannot be serialized must not sign");
+        assert_eq!(error.kind(), crate::error::ErrorKind::Internal);
+        assert_eq!(error.message(), texts().internal.as_ref());
+        assert!(std::error::Error::source(&error).is_some());
     }
 
     #[test]

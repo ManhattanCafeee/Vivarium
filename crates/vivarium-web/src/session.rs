@@ -15,7 +15,7 @@
 //! - [`session_layer`] resolves the cookie, validates the session against the
 //!   store (deleting dead rows), stashes [`SessionCtx`] and [`SessionId`] in
 //!   the request extensions and, after the handler, renews the session once it
-//!   has lived past half its TTL. The middleware never rejects a request —
+//!   has been idle for half its TTL. The middleware never rejects a request —
 //!   authentication decisions are the [`SessionCtx`] extractor's job.
 //! - [`SessionAuth::start`] mints a session at login, [`SessionAuth::end`]
 //!   deletes one at logout, and [`SessionAuth::set_cookie_value`] produces the
@@ -164,8 +164,19 @@ impl CookieOptions {
 /// let id = SessionId("8Qm…".to_string());
 /// assert_eq!(id.digest().len(), 64);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SessionId(pub String);
+
+impl std::fmt::Debug for SessionId {
+    /// Prints the digest, not the credential: an id is valid until its session
+    /// expires, so a `{:?}` in a log or a span must not reveal it. The digest
+    /// prefix still identifies the session well enough to correlate a log line
+    /// with a store row.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let digest = self.digest();
+        write!(f, "SessionId({}…)", &digest[..8])
+    }
+}
 
 impl SessionId {
     /// The SHA-256 digest of this id, as stored and looked up.
@@ -374,9 +385,20 @@ impl<S: SessionStore> SessionAuth<S> {
     /// The `Set-Cookie` header value establishing a session with a fresh
     /// `Max-Age` equal to the TTL.
     ///
-    /// The attributes come from the configured [`CookieOptions`].
+    /// The attributes come from the configured [`CookieOptions`]. When an
+    /// absolute cap is configured and shorter than the TTL, the `Max-Age` is
+    /// the cap instead: the cookie then expires with the session `start` just
+    /// created rather than outliving it.
     pub fn set_cookie_value(&self, id: &SessionId) -> HeaderValue {
-        self.cookie_value(id.as_str(), self.ttl.as_secs())
+        self.cookie_value(id.as_str(), self.fresh_max_age())
+    }
+
+    /// The lifetime `start` gives a fresh session, in seconds.
+    fn fresh_max_age(&self) -> u64 {
+        self.absolute_ttl
+            .unwrap_or(self.ttl)
+            .min(self.ttl)
+            .as_secs()
     }
 
     /// The `Set-Cookie` header value that expires the session cookie
@@ -587,12 +609,16 @@ where
                 if should_extend(record, auth.ttl()) && !handler_owns_cookie {
                     // The session survived the lookup, so its absolute deadline
                     // is still ahead: the renewal below can only move forward.
-                    let renewed = auth.expiry(record.created_at, now);
-                    match auth.store().touch(digest, renewed, now).await {
+                    // Time is read again here — the lookup's `now` predates the
+                    // handler, and the browser starts counting `Max-Age` when
+                    // the response arrives.
+                    let renewed_at = Utc::now();
+                    let renewed = auth.expiry(record.created_at, renewed_at);
+                    match auth.store().touch(digest, renewed, renewed_at).await {
                         Ok(()) => {
                             // The cookie expires with the session, so the
                             // client drops it at the absolute cap too.
-                            let max_age = (renewed - now).num_seconds().max(1) as u64;
+                            let max_age = (renewed - renewed_at).num_seconds().max(1) as u64;
                             response.headers_mut().append(
                                 header::SET_COOKIE,
                                 auth.cookie_value(id.as_str(), max_age),
@@ -1151,5 +1177,67 @@ mod tests {
             (25..=30).contains(&age),
             "cookie must expire with the cap, got Max-Age={age}: {cookie}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_recently_active_session_is_not_renewed() {
+        let now = Utc::now();
+        let store = InMemorySessionStore::default();
+        let expires_at = now + TimeDelta::seconds(60);
+        // Active ten seconds ago: well inside the half-TTL threshold.
+        store.insert(
+            &hash_token("raw"),
+            record(
+                7,
+                now - TimeDelta::seconds(120),
+                expires_at,
+                now - TimeDelta::seconds(10),
+            ),
+        );
+        let app = me_app(auth(store.clone(), None));
+
+        let (status, response) = drive(app, req_get("/me", Some("sid=raw"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            store.get(&hash_token("raw")).expect("kept").expires_at,
+            expires_at,
+            "a recent session must not be touched"
+        );
+        assert!(
+            set_cookies(&response).is_empty(),
+            "a recent session must not re-issue the cookie: {}",
+            set_cookies(&response)
+        );
+    }
+
+    #[test]
+    fn login_cookie_never_outlives_a_shorter_absolute_cap() {
+        let id = SessionId("raw".to_string());
+
+        let capped = SessionAuth::new(
+            InMemorySessionStore::default(),
+            CookieOptions::new("sid"),
+            Duration::from_secs(86_400),
+            Some(Duration::from_secs(3600)),
+        );
+        assert_eq!(
+            max_age(capped.set_cookie_value(&id).to_str().unwrap()),
+            3600
+        );
+
+        let uncapped = auth(InMemorySessionStore::default(), None);
+        assert_eq!(
+            max_age(uncapped.set_cookie_value(&id).to_str().unwrap()),
+            TTL.as_secs()
+        );
+    }
+
+    #[test]
+    fn session_id_debug_prints_the_digest_not_the_credential() {
+        let id = SessionId("a-bearer-credential".to_string());
+        let printed = format!("{id:?}");
+
+        assert!(!printed.contains("a-bearer-credential"), "{printed}");
+        assert_eq!(printed, format!("SessionId({}…)", &id.digest()[..8]));
     }
 }

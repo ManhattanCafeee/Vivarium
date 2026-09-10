@@ -138,20 +138,26 @@ is logged out; the digest column also has to be wide enough:
 
 ```sql
 -- MySQL dialect; `VARCHAR(64)` replaces the UUID `VARCHAR(36)`.
+-- `sessions` needs the new created_at column (the base of `absolute_ttl`) and,
+-- unless 0.2's recommended schema was followed literally, last_activity.
 ALTER TABLE sessions
     MODIFY session_id VARCHAR(64) NOT NULL,   -- sha256 digest
-    ADD COLUMN last_activity DATETIME NOT NULL DEFAULT (UTC_TIMESTAMP());
+    ADD COLUMN created_at DATETIME NOT NULL,
+    ADD COLUMN last_activity DATETIME NOT NULL;
+
 ALTER TABLE refresh_tokens
-    MODIFY token VARCHAR(64) NOT NULL,        -- sha256 digest
-    ADD COLUMN last_activity DATETIME NOT NULL DEFAULT (UTC_TIMESTAMP());
+    MODIFY token VARCHAR(64) NOT NULL;        -- sha256 digest
 
 -- Raw ids are unreadable by 0.3: logging everyone out is the migration.
 DELETE FROM sessions;
 DELETE FROM refresh_tokens;
 ```
 
-`SessionRecord` carries `created_at` (the base of `absolute_ttl`) besides
-`expires_at` and `last_activity`, and the stores are keyed by the
+`SessionStore::create` always supplies `created_at`/`expires_at`/
+`last_activity`, so an app-owned `sessions` table is exactly
+`(session_id VARCHAR(64) UNIQUE, user_id, created_at, expires_at,
+last_activity)`; `refresh_tokens` is `(token_hash VARCHAR(64) UNIQUE, user_id,
+expires_at)` and reads no activity timestamp. Both stores are keyed by the
 application's own user id type (`type UserId`), not `i64`.
 
 **Timestamps are `chrono::DateTime<Utc>`.** `SessionStore` and

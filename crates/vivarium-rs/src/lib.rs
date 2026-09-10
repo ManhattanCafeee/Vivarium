@@ -105,8 +105,8 @@ pub use vivarium_web::{
     SessionRecord, SessionStore, Texts, TokenPair, ValidationErrors, Varser, VerifyOutcome, authz,
     cache, debug_mode, error, get_authorization, hash, hash_token, hash_with, install_debug_mode,
     install_texts, jwt, needs_rehash, password, perms_match, response, secrets, serve,
-    serve_with_shutdown, session, session_layer, shutdown_signal, texts, token, validation, varser,
-    verify, verify_and_upgrade, verify_login,
+    serve_with_shutdown, session, session_layer, should_extend, shutdown_signal, texts, token,
+    validation, varser, verify, verify_and_upgrade, verify_login,
 };
 
 #[cfg(all(feature = "web", feature = "validation-garde"))]

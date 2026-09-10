@@ -186,14 +186,25 @@ let page = Query::<_, User>::new()
 ### 4. JWT in three lines
 
 ```rust,no_run
+use serde::{Deserialize, Serialize};
 use vivarium_rs::jwt::{decode_token, sign_token};
 
-let token = sign_token(&Claims { sub: "ada".into(), exp: 0 }, SECRET)?;
+#[derive(Serialize, Deserialize)]
+struct Claims {
+    sub: u64,
+    exp: i64,
+}
+
+let token = sign_token(&Claims { sub: 7, exp: 0 }, SECRET)?;
 let claims: Claims = decode_token(&token, SECRET)?;   // HS256 fixed; RS256 rejected
 ```
 
 Or as middleware: `.route_layer(vivarium_rs::jwt::jwt_auth::<Claims>(SECRET.into()))`
-puts the decoded claims into request extensions.
+puts the decoded claims into request extensions. [`JwtVerifier`] wraps the same
+machinery with a configuration (leeway, `aud`/`iss`, required claims) and a
+key ring that keeps retired secrets verifying through a rotation.
+
+[`JwtVerifier`]: https://docs.rs/vivarium-web/latest/vivarium_web/jwt/struct.JwtVerifier.html
 
 ### 5. Sessions with a sliding TTL and an absolute cap
 
@@ -283,6 +294,7 @@ echoed back in `params`.
 | `config` | hot-reloadable config |
 | `validation-garde` | the `Garde*` extractors (bound to `garde::Validate`) in addition to the default validator-based ones |
 | `utoipa` / `utoipa-ui` | `ToSchema` derives plus the OpenAPI helpers (`utoipa-ui` downloads nothing: Swagger UI assets are vendored) |
+| `telemetry` | `serve::telemetry::init` — stdout lines plus optional daily-rotated JSON log files (requires `web`) |
 
 Defaults: `web`, `config`, `db`, `db-sqlite`, `db-postgres`.
 

@@ -55,9 +55,9 @@ impl PermissionSet {
     /// `Err(ApiError::forbidden)` with the catalog's
     /// [`forbidden`](crate::texts::Texts::forbidden) message.
     ///
-    /// The refused code is logged (at debug level), not returned: which
-    /// permission was missing is useful to an operator and a hint to an
-    /// attacker.
+    /// The refused code is logged at debug level and deliberately kept out of
+    /// the response: naming the missing permission tells an attacker which
+    /// privileges exist, while an operator gets it from the log.
     pub fn require(&self, target: &str) -> Result<(), ApiError> {
         if self.has(target) {
             Ok(())
