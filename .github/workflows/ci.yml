@@ -80,6 +80,25 @@ jobs:
           cargo check -p vivarium-rs --no-default-features
           cargo check -p vivarium-rs --no-default-features --features db-mysql
           cargo check -p vivarium-rs --no-default-features --features web,telemetry
+      - name: Path dependency versions match the workspace
+        # `cargo publish` refuses a path dependency whose version requirement
+        # does not resolve to the same crate, and that only surfaces at release
+        # time — so the requirements are checked here instead.
+        run: |
+          cargo metadata --format-version 1 --no-deps > /tmp/metadata.json
+          jq -r '
+            .packages as $members
+            | $members[]
+            | . as $package
+            | $package.dependencies[]
+            | select(.path != null)
+            | . as $dependency
+            | ($members[] | select(.name == $dependency.name) | .version) as $workspace
+            | select($workspace != null)
+            | select(($dependency.req | ltrimstr("^")) != $workspace)
+            | "\($package.name) requires \($dependency.name) \($dependency.req), but the workspace crate is \($workspace)"
+          ' /tmp/metadata.json | tee /tmp/mismatch.txt
+          test ! -s /tmp/mismatch.txt
       - name: Doc
         run: cargo doc --no-deps --all-features
       - name: Offline query check

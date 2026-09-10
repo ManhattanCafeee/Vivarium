@@ -15,6 +15,7 @@
 //! | `config` | [`Config`], [`ConfigOptions`], [`ConfigWatcher`] |
 //! | `validation-garde` | the `Garde*` extractors (requires `web`) |
 //! | `utoipa` / `utoipa-ui` | `ToSchema` derives plus the `openapi` helpers (requires `web` for the latter) |
+//! | `telemetry` | `serve::telemetry::init` — stdout lines plus optional JSON log files (requires `web`) |
 //!
 //! Default features: `web`, `config`, `db`, `db-sqlite`, `db-postgres`.
 //!
@@ -94,6 +95,16 @@ pub use vivarium_db::{
     delete, exists, find_by_id, is_unique_violation, sqlx, update_by_id, with_transaction,
 };
 
+/// Driver glue re-exported through the facade so a bound written against
+/// `vivarium-db`'s sealed traits resolves without a second dependency.
+///
+/// Internal: not part of the stable API, and deliberately hidden from the docs
+/// (the traits are sealed and only appear in bounds the library itself
+/// satisfies).
+#[cfg(feature = "db")]
+#[doc(hidden)]
+pub use vivarium_db::{DriverOps, Step};
+
 pub use vivarium_macros::Entity;
 
 #[cfg(feature = "web")]
@@ -117,3 +128,14 @@ pub use vivarium_web::openapi;
 
 #[cfg(feature = "config")]
 pub use vivarium_config::{Config, ConfigError, ConfigOptions, ConfigWatcher, HandlerId};
+
+/// The workspace README, compiled as doctests.
+///
+/// Every `rust` snippet on the crate's front page (which is this repository's
+/// README, `readme = "../../README.md"`) is type-checked by
+/// `cargo test --doc`, so the quick-start examples cannot drift from the API
+/// they document. `cfg(doctest)` keeps this item out of the rendered
+/// documentation — it exists only for the doctest collector.
+#[cfg(all(doctest, feature = "web", feature = "db", feature = "config"))]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeDoctests;

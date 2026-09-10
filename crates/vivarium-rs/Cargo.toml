@@ -36,14 +36,16 @@ utoipa-ui = ["utoipa", "vivarium-web?/utoipa-ui"]
 telemetry = ["vivarium-web?/telemetry"]
 
 [dependencies]
-vivarium-core = { version = "0.1.0", path = "../vivarium-core" }
-vivarium-db = { version = "0.2.0", path = "../vivarium-db", optional = true, default-features = false }
-vivarium-web = { version = "0.2.0", path = "../vivarium-web", optional = true }
-vivarium-config = { version = "0.1.0", path = "../vivarium-config", optional = true }
-vivarium-macros = { version = "0.1.0", path = "../vivarium-macros" }
+vivarium-core = { version = "0.1.2", path = "../vivarium-core" }
+vivarium-db = { version = "0.2.1", path = "../vivarium-db", optional = true, default-features = false }
+vivarium-web = { version = "0.2.1", path = "../vivarium-web", optional = true }
+vivarium-config = { version = "0.1.1", path = "../vivarium-config", optional = true }
+vivarium-macros = { version = "0.1.2", path = "../vivarium-macros" }
 
 [dev-dependencies]
+anyhow = "1"
 axum = { version = "0.8", features = ["json"] }
+chrono = "0.4"
 http-body-util = "0.1.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

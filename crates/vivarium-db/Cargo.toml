@@ -27,7 +27,7 @@ sqlx = { version = "0.9", default-features = false, features = ["macros", "migra
 uuid = "1.26.0"
 tracing = "0.1.44"
 vivarium-core = { version = "0.1.2", path = "../vivarium-core", features = ["chrono", "uuid"] }
-vivarium-macros = { version = "0.1.0", path = "../vivarium-macros" }
+vivarium-macros = { version = "0.1.2", path = "../vivarium-macros" }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["full"] }

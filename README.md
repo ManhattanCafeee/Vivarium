@@ -31,6 +31,7 @@ sqlx = { version = "0.9", features = ["sqlite", "migrate"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 validator = { version = "0.20", features = ["derive"] }
+chrono = "0.4"            # the auth stores take `DateTime<Utc>`
 ```
 
 ### 1. A sqlite + axum service
@@ -82,13 +83,21 @@ async fn create_user(
     }))
 }
 
+# async fn migrations(pool: &SqlitePool) -> Result<(), sqlx::migrate::MigrateError> {
+#     // Stands in for the application's own `sqlx::migrate!("./migrations")`,
+#     // which needs a migration directory next to the crate that calls it.
+#     sqlx::migrate!("../vivarium-db/examples/migrations")
+#         .run(pool)
+#         .await
+# }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let pool = SqlitePoolOptions::new().connect("sqlite://app.db").await?;
     // Migrations are application-owned: the library ships no migrator, so a
     // library-owned `_sqlx_migrations` table can never collide with yours.
-    // Copy `vivarium-db/examples/migrations/` as a starting layout.
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    // Copy `vivarium-db/examples/migrations/` as a starting layout, then:
+    //     sqlx::migrate!("./migrations").run(&pool).await?;
+    migrations(&pool).await?;
     let app = Router::new()
         .route("/users", post(create_user))
         .with_state(pool);
@@ -121,6 +130,12 @@ only for an internal error while debug mode is on (`VIVARIUM_DEBUG=1` or
 ```rust,no_run
 use vivarium_rs::{Column, Order, Predicate, Query, Sorter};
 
+# #[derive(Clone, sqlx::FromRow, vivarium_rs::Entity)]
+# #[entity(table = "users")]
+# struct User {
+#     id: i64,
+#     name: String,
+# }
 #[derive(Clone, Copy)]
 enum UserCol { Name, Age }
 impl Column for UserCol {
@@ -152,8 +167,21 @@ binds there).
 Partial updates and transactions stay in the same typed layer:
 
 ```rust,no_run
-use vivarium_rs::{Expr, Update, with_transaction};
+use vivarium_rs::{Column, Expr, Update, create, with_transaction};
 
+# #[derive(Clone, sqlx::FromRow, vivarium_rs::Entity)]
+# #[entity(table = "users")]
+# struct User {
+#     id: i64,
+#     name: String,
+# }
+# #[derive(Clone, Copy)]
+# enum UserCol { Name, Age }
+# impl Column for UserCol {
+#     fn name(&self) -> &'static str {
+#         match self { UserCol::Name => "name", UserCol::Age => "age" }
+#     }
+# }
 async fn example(pool: &vivarium_rs::sqlx::sqlite::SqlitePool) -> sqlx::Result<()> {
 Update::<User, UserCol>::new(1_i64)
     .set(UserCol::Name, "ada")
@@ -176,11 +204,22 @@ Ok(())
 ### 3. Pagination
 
 ```rust,no_run
+use vivarium_rs::Query;
+
+# #[derive(Clone, sqlx::FromRow, vivarium_rs::Entity)]
+# #[entity(table = "users")]
+# struct User {
+#     id: i64,
+#     name: String,
+# }
+# async fn example(pool: vivarium_rs::sqlx::sqlite::SqlitePool) -> sqlx::Result<()> {
 let page = Query::<_, User>::new()
     .paginate(vivarium_rs::Pagination::new(2, 20), &pool)
     .await?;
 // page.items, page.total, page.page, page.per_page, page.pages()
 // out-of-range page/per_page values are normalized
+# Ok(())
+# }
 ```
 
 ### 4. JWT in three lines
@@ -189,6 +228,8 @@ let page = Query::<_, User>::new()
 use serde::{Deserialize, Serialize};
 use vivarium_rs::jwt::{decode_token, sign_token};
 
+# const SECRET: &str = "app-secret";
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
 #[derive(Serialize, Deserialize)]
 struct Claims {
     sub: u64,
@@ -197,6 +238,9 @@ struct Claims {
 
 let token = sign_token(&Claims { sub: 7, exp: 0 }, SECRET)?;
 let claims: Claims = decode_token(&token, SECRET)?;   // HS256 fixed; RS256 rejected
+# assert_eq!(claims.sub, 7);
+# Ok(())
+# }
 ```
 
 Or as middleware: `.route_layer(vivarium_rs::jwt::jwt_auth::<Claims>(SECRET.into()))`
@@ -213,14 +257,34 @@ use std::time::Duration;
 use axum::{Router, routing::get};
 use vivarium_rs::{CookieOptions, SessionAuth, SessionCtx, session_layer};
 
+# use chrono::{DateTime, Utc};
+# use vivarium_rs::{ApiError, SessionId, SessionRecord, SessionStore};
+# #[derive(Clone, Default)]
+# struct MyStore;
+# impl SessionStore for MyStore {
+#     type UserId = u64;
+#     async fn create(&self, _id: &str, _user: u64, _created_at: DateTime<Utc>,
+#         _expires_at: DateTime<Utc>, _last_activity: DateTime<Utc>) -> Result<(), ApiError> { Ok(()) }
+#     async fn find(&self, _id: &str) -> Result<Option<SessionRecord<u64>>, ApiError> { Ok(None) }
+#     async fn touch(&self, _id: &str, _expires_at: DateTime<Utc>, _last_activity: DateTime<Utc>)
+#         -> Result<(), ApiError> { Ok(()) }
+#     async fn remove(&self, _id: &str) -> Result<bool, ApiError> { Ok(false) }
+#     async fn remove_by_user(&self, _user: u64) -> Result<u64, ApiError> { Ok(0) }
+# }
+# fn example() {
+let my_store = MyStore;                          // yours: the store is app-owned
 let auth = SessionAuth::new(
-    my_store,                                    // SessionStore is app-owned
+    my_store,
     CookieOptions::new("sid"),                   // Secure; HttpOnly; SameSite=Lax; Path=/
     Duration::from_hours(24),                    // slides while the session is used
     Some(Duration::from_hours(24 * 7)),          // absolute cap, never extended past
 );
-let app = Router::new().route("/me", get(|SessionCtx { user_id }: SessionCtx<u64>| user_id.to_string()))
+let app: Router = Router::new().route("/me", get(|SessionCtx { user_id }: SessionCtx<u64>| async move {
+    user_id.to_string()
+}))
     .layer(session_layer(auth));
+# let _ = app;
+# }
 ```
 
 The middleware looks up the session by its SHA-256 digest (deleting dead
@@ -245,6 +309,7 @@ and reports when a stored hash should be upgraded.
 use std::sync::Arc;
 use vivarium_rs::{Config, ConfigOptions};
 
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
 #[derive(serde::Deserialize, serde::Serialize)]
 struct AppConfig {
     port: u16,
@@ -261,6 +326,10 @@ config.register(|cfg: &AppConfig| println!("port is now {}", cfg.port));
 config.on_error(|err| eprintln!("config error: {err}"));
 let watcher = Arc::clone(&config).watch()?;   // stops when the watcher drops
 let cfg = config.get();                       // lock-free Arc read
+# assert_eq!(cfg.port, 8080);
+# drop(watcher);
+# Ok(())
+# }
 ```
 
 ### 7. Validation errors and localization
