@@ -3,7 +3,9 @@
 
 use serde_json::json;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
-use vivarium_db::{Entity, Value, count, create, delete, exists, find_by_id, update_by_id};
+use vivarium_db::{
+    Entity, NullType, Value, count, create, delete, exists, find_by_id, update_by_id,
+};
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, vivarium_db::Entity)]
 #[entity(table = "users", crate = "vivarium_db")]
@@ -204,6 +206,59 @@ fn a_non_id_u64_field_within_i64_max_encodes() {
         .columns_and_values()
         .expect("42 fits in i64");
     assert_eq!(columns, vec![("hits", Value::I64(42))]);
+}
+
+#[test]
+fn a_non_id_u64_field_at_i64_max_encodes() {
+    let columns = HitRow {
+        id: 7,
+        hits: i64::MAX as u64,
+    }
+    .columns_and_values()
+    .expect("i64::MAX is representable");
+    assert_eq!(columns, vec![("hits", Value::I64(i64::MAX))]);
+}
+
+/// The derive must also expand for the other checked types and for a nullable
+/// one: `usize` shares the checked path with `u64`, and `Some`/`None` must
+/// still go through the conversion and the typed `NULL` respectively.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow, vivarium_db::Entity)]
+#[entity(table = "lossy_rows", crate = "vivarium_db")]
+struct LossyRow {
+    #[entity(id)]
+    id: i64,
+    small: usize,
+    maybe: Option<u64>,
+}
+
+#[test]
+fn usize_and_optional_u64_fields_encode() {
+    let columns = LossyRow {
+        id: 1,
+        small: 7,
+        maybe: None,
+    }
+    .columns_and_values()
+    .expect("None binds a typed null");
+    assert_eq!(
+        columns,
+        vec![
+            ("small", Value::I64(7)),
+            ("maybe", Value::TypedNull(NullType::I64)),
+        ]
+    );
+
+    let error = LossyRow {
+        id: 1,
+        small: 7,
+        maybe: Some(u64::MAX),
+    }
+    .columns_and_values()
+    .expect_err("Some(u64::MAX) has no i64 representation");
+    assert!(
+        error.to_string().contains("above i64::MAX"),
+        "the encode error must name the overflow, got {error}"
+    );
 }
 
 #[test]

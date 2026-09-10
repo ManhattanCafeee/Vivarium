@@ -13,7 +13,7 @@ Six crates, layered bottom-up (publish order = same order):
 | `vivarium-core` | Shared vocabulary: `Pagination`, `Page<T>`, `Order`, `Column`, `Sorter`, `Value`/`NullType`, `PrimaryKey`, `Entity` trait, `EncodeError` | none (serde + serde_json; optional chrono/uuid/utoipa) |
 | `vivarium-macros` | Proc-macro `#[derive(Entity)]` (`#[entity(...)]` attrs) | none (syn/quote) |
 | `vivarium-db` | sqlx layer: generic CRUD, `Query<DB, T>` builder + `Predicate` filters, `Update`, `with_transaction`, no migrator | core + macros + sqlx |
-| `vivarium-web` | axum layer: `ApiResponse`/`ApiError` envelope, `Texts` catalog, `Varser` family, JWT/session/refresh-token auth (digest-only storage), Argon2 passwords, `CacheControl` layer, OpenAPI helpers | **none — standalone** (optional `sqlx` feature for `conflict_from_db`, optional `telemetry` for `serve::telemetry`) |
+| `vivarium-web` | axum layer: `ApiResponse`/`ApiError` envelope, `Texts` catalog, `Varser` family, JWT/session/refresh-token auth (digest-only storage), Argon2 passwords, `CacheControl` layer, OpenAPI helpers | **none at runtime — standalone** (optional `sqlx` feature for `conflict_from_db`, optional `telemetry` for `serve::telemetry`); its tests take a dev-dependency on `vivarium-core` (`utoipa`) to pin the composed `ApiResponse_Page_User` name, so a `cargo publish -p vivarium-web` dry run resolves that version from the registry |
 | `vivarium-config` | figment + notify + arc-swap hot reload | **none — standalone** |
 | `vivarium-rs` | Facade: feature-gated re-exports of everything | all of the above |
 
@@ -77,7 +77,7 @@ SQLX_OFFLINE=true cargo check --workspace --all-features
 - `crates/vivarium-web/src/openapi.rs` — utoipa security schemes, `info`, `mount` (feature `utoipa`/`utoipa-ui`)
 - `crates/vivarium-config/src/lib.rs` — single-module crate; reload/watch semantics
 - `crates/vivarium-rs/src/lib.rs` — facade re-export matrix + feature definitions
-- `.github/workflows/ci.yml` — full gate (fmt, clippy `-D warnings`, test, single-feature checks, README-doctest count assertion, doc, `SQLX_OFFLINE=true` check; matrix stable + 1.94.0; postgres:16 + mysql:8.4 services)
+- `.github/workflows/ci.yml` — full gate (fmt, clippy `-D warnings`, test, single-feature checks, README-doctest baseline assertion (≥5 `ReadmeDoctests` entries), doc, `SQLX_OFFLINE=true` check; matrix stable + 1.94.0; postgres:16 + mysql:8.4 services)
 - `README.md` — quick start; `docs/go-rust-mapping.md` — Go→Rust porting map (non-ports rationale)
 - `crates/vivarium-db/examples/migrations/0001_create_users.sql` (+ `.down.sql`) — sample migration layout, not compiled into the library
 

@@ -433,8 +433,10 @@ fn is_primary_key_type(ty: &Type) -> bool {
 /// True for the integer types mapped onto `Value::I64` (`i64` excluded; it is
 /// handled separately so it can be passed through without a cast).
 ///
-/// `u64`/`usize`/`isize` are not included: they are handled by
-/// [`is_lossy_integer_type`], which converts with a checked conversion.
+/// `u64`/`usize`/`isize` stay in this list because `null_variant` uses it to
+/// pick the typed `NULL` for `Option<T>` fields; `scalar_value_expr` routes
+/// those three through [`is_lossy_integer_type`] first, so their values are
+/// converted with a checked conversion.
 fn is_integer_type(ty: &Type) -> bool {
     [
         "i8", "i16", "i32", "u8", "u16", "u32", "u64", "usize", "isize",

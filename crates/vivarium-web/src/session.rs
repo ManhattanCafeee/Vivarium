@@ -1210,10 +1210,11 @@ mod tests {
     async fn renewal_landing_on_an_elapsed_deadline_sends_max_age_one() {
         let now = Utc::now();
         let store = InMemorySessionStore::default();
-        // Five-second cap, created four seconds ago: the deadline is ~1s away,
+        // Five-second cap, created three seconds ago: the deadline is ~2s away,
         // the idle time makes renewal due, and the sliding expiry is far out —
-        // so the session is alive at lookup but cannot renew past the cap.
-        let created_at = now - TimeDelta::seconds(4);
+        // so the session is alive at lookup but cannot renew past the cap. The
+        // two-second margin keeps a scheduling stall from flipping the branch.
+        let created_at = now - TimeDelta::seconds(3);
         let deadline = created_at + TimeDelta::seconds(5);
         store.insert(
             &hash_token("raw"),

@@ -65,14 +65,17 @@ jobs:
         # The root README is compiled as doctests by `vivarium-rs` only under
         # `doctest` plus the `web`, `config` and `db-sqlite` features; without
         # them the run silently skips those tests and still exits 0. `--all-features`
-        # must therefore produce `ReadmeDoctests` entries in the output. The log
+        # must therefore produce `ReadmeDoctests` entries in the output, and at
+        # least the five the README's snippets yield today: turning one into
+        # `rust,ignore` would otherwise drop it from the suite unnoticed. The log
         # file keeps `grep -q` from closing the pipe early (which would send
         # SIGPIPE into the test harness); `pipefail` keeps cargo's exit code
-        # authoritative — `grep` is only the "did it really run" probe.
+        # authoritative — the greps are only the "did it really run" probes.
         run: |
           set -eo pipefail
           cargo test --doc -p vivarium-rs --all-features 2>&1 | tee /tmp/readme-doctests.log
           grep -q ReadmeDoctests /tmp/readme-doctests.log
+          test "$(grep -c ReadmeDoctests /tmp/readme-doctests.log)" -ge 5
       - name: Feature combinations
         # `--all-features` cannot prove that a single feature compiles on its
         # own, so the optional features are checked individually.
