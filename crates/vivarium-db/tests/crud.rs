@@ -136,3 +136,50 @@ async fn json_column_round_trip() {
         json!({"langs": ["rust", "go"], "score": 9.5})
     );
 }
+
+/// A `#[entity(json)]` column whose value cannot be serialized (a map with
+/// non-string keys). The derive must report it, not panic.
+#[derive(Debug, vivarium_db::Entity)]
+#[entity(table = "users", crate = "vivarium_db")]
+struct UnserializableProfile {
+    id: i64,
+    name: String,
+    email: Option<String>,
+    age: i32,
+    active: bool,
+    #[entity(json)]
+    profile: std::collections::HashMap<(i32, i32), i32>,
+}
+
+#[tokio::test]
+async fn a_json_field_that_cannot_serialize_is_an_encode_error() {
+    let pool = pool().await;
+    let mut profile = std::collections::HashMap::new();
+    profile.insert((1, 2), 3);
+
+    let error = create(
+        &pool,
+        UnserializableProfile {
+            id: 0,
+            name: "ada".to_owned(),
+            email: None,
+            age: 30,
+            active: true,
+            profile,
+        },
+    )
+    .await
+    .expect_err("a field that cannot be serialized must not insert");
+
+    assert!(
+        matches!(error, sqlx::Error::Encode(_)),
+        "the serialization failure must surface as Error::Encode, got {error:?}"
+    );
+    assert_eq!(
+        count::<UnserializableProfile, _>(&pool)
+            .await
+            .expect("count"),
+        0,
+        "nothing may be written when the entity cannot be encoded"
+    );
+}

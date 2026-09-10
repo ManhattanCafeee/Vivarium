@@ -644,12 +644,35 @@ where
 }
 
 /// Extracts a cookie's value from the `Cookie` request header.
+///
+/// Parsing goes through the `cookie` crate rather than string surgery:
+///
+/// - Percent-encoded values are decoded (`split_parse_encoded`), symmetric with
+///   the [`encoded()`](cookie::Cookie::encoded) form [`SessionAuth`] writes, so
+///   an id that needed escaping on the way out is found again on the way in.
+/// - A value wrapped in double quotes is unquoted, as RFC 6265's
+///   `cookie-value` grammar allows; an unpaired quote is left alone, so a
+///   malformed cookie simply fails to match a session.
+/// - A value-less `name=` yields an empty string rather than being dropped: no
+///   digest matches it, so the middleware treats it as a stale cookie and
+///   clears it.
+/// - Segments that fail to parse (no `=`, an empty name) are skipped, and other
+///   cookies are ignored.
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    Cookie::split_parse(raw)
+    let value = Cookie::split_parse_encoded(raw)
         .filter_map(Result::ok)
         .find(|cookie| cookie.name() == name)
-        .map(|cookie| cookie.value().to_string())
+        .map(|cookie| cookie.value().to_string())?;
+    Some(unquote(&value).to_string())
+}
+
+/// Strips one pair of surrounding double quotes, leaving a lone quote alone.
+fn unquote(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(value)
 }
 
 /// Whether the response already sets the session cookie.
@@ -1239,5 +1262,93 @@ mod tests {
 
         assert!(!printed.contains("a-bearer-credential"), "{printed}");
         assert_eq!(printed, format!("SessionId({}…)", &id.digest()[..8]));
+    }
+
+    /// A request header with the given `Cookie` value.
+    fn headers(raw: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(raw).expect("a valid header"),
+        );
+        headers
+    }
+
+    #[test]
+    fn cookie_values_are_parsed_per_rfc_6265() {
+        // Percent-encoded values are decoded, symmetrically with `encoded()`.
+        assert_eq!(
+            cookie_value(&headers("sid=a%2Bb%2Fc"), "sid").as_deref(),
+            Some("a+b/c")
+        );
+        // A quoted value is unquoted; the quotes are not part of the id.
+        assert_eq!(
+            cookie_value(&headers("sid=\"abc\""), "sid").as_deref(),
+            Some("abc")
+        );
+        // An unpaired quote is not a quoted value, and stays as it is.
+        assert_eq!(
+            cookie_value(&headers("sid=\"abc"), "sid").as_deref(),
+            Some("\"abc")
+        );
+        assert_eq!(
+            cookie_value(&headers("sid=abc\""), "sid").as_deref(),
+            Some("abc\"")
+        );
+        // A value-less cookie is kept as an empty string, not dropped: the
+        // middleware then clears the stale cookie instead of ignoring it.
+        assert_eq!(cookie_value(&headers("sid="), "sid").as_deref(), Some(""));
+        // Other cookies, name prefixes and malformed segments are skipped.
+        assert_eq!(
+            cookie_value(&headers("other=1; sid=abc; more=2"), "sid").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(cookie_value(&headers("sid_suffix=abc"), "sid"), None);
+        assert_eq!(
+            cookie_value(&headers("garbage; sid=abc"), "sid").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(cookie_value(&headers("=abc"), "sid"), None);
+        assert_eq!(cookie_value(&headers(""), "sid"), None);
+    }
+
+    #[tokio::test]
+    async fn an_escaped_session_id_round_trips_through_the_cookie() {
+        let now = Utc::now();
+        let store = InMemorySessionStore::default();
+        let auth = auth(store.clone(), None);
+        // An id that has to be escaped on the way out, to exercise the
+        // encoder/decoder pair rather than the identity path.
+        let id = SessionId("ab+cd/ef".to_string());
+        let set_cookie = auth
+            .set_cookie_value(&id)
+            .to_str()
+            .expect("ascii cookie")
+            .to_string();
+        assert!(
+            set_cookie.contains('%'),
+            "the writer must escape this value: {set_cookie}"
+        );
+
+        let request_cookie = set_cookie
+            .split(';')
+            .next()
+            .expect("a name=value pair")
+            .to_string();
+        store.insert(&id.digest(), record(7, now, now + delta(TTL), now));
+
+        let app = me_app(auth);
+        let (status, response) = drive(app, req_get("/me", Some(&request_cookie))).await;
+        assert_eq!(status, StatusCode::OK, "cookie: {request_cookie}");
+        assert_eq!(body_text(response).await, "7");
+    }
+
+    #[tokio::test]
+    async fn an_empty_or_malformed_cookie_is_treated_as_stale() {
+        let app = me_app(auth(InMemorySessionStore::default(), None));
+
+        let (status, response) = drive(app, req_get("/me", Some("sid="))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(set_cookies(&response).contains("Max-Age=0"));
     }
 }
