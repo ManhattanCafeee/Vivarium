@@ -1381,10 +1381,24 @@ mod tests {
         );
     }
 
-    /// A user provider whose second `data()` call panics, as a buggy provider
-    /// would: the first call runs while loading, so reloads hit the panic.
+    /// A user provider that panics on every `data()` call until the test heals
+    /// it. Call counting would be platform-dependent: one write can deliver more
+    /// than one watcher event, so "panic on the second call" lets a later event
+    /// reload successfully while the test still expects failures.
     struct PanickingProvider {
-        calls: AtomicUsize,
+        healthy: Arc<AtomicBool>,
+    }
+
+    impl PanickingProvider {
+        fn new() -> (Self, Arc<AtomicBool>) {
+            let healthy = Arc::new(AtomicBool::new(true));
+            (
+                Self {
+                    healthy: Arc::clone(&healthy),
+                },
+                healthy,
+            )
+        }
     }
 
     impl Provider for PanickingProvider {
@@ -1393,9 +1407,7 @@ mod tests {
         }
 
         fn data(&self) -> Result<ProfileMap<Profile, Dict>, figment::Error> {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
-                panic!("provider exploded");
-            }
+            assert!(self.healthy.load(Ordering::SeqCst), "provider exploded");
 
             let mut values = Dict::new();
             values.insert(
@@ -1412,9 +1424,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn panic_in_a_provider_is_reported_and_watching_continues() {
         let (_dir, path) = config_file(&toml("old", 1));
-        let provider = PanickingProvider {
-            calls: AtomicUsize::new(0),
-        };
+        let (provider, healthy) = PanickingProvider::new();
         let options = ConfigOptions::new(&path).file().merge(provider);
         let config = Arc::new(Config::<AppConfig>::load_with(options).unwrap());
 
@@ -1431,25 +1441,43 @@ mod tests {
 
         let _watcher = Arc::clone(&config).watch().unwrap();
 
-        // This reload panics inside the provider, which without catching would
-        // kill the watcher thread.
+        // Every reload panics from here on: a single write can deliver more than
+        // one file-system event, and each of them has to be caught.
+        healthy.store(false, Ordering::SeqCst);
         std::fs::write(&path, toml("second", 2)).unwrap();
         let (is_handler_panic, panic) = reported.recv_timeout(Duration::from_secs(10)).unwrap();
         assert!(panic.contains("provider exploded"), "{panic}");
         assert!(is_handler_panic, "{panic}");
 
-        // The failed reload called no update handler and kept the old value.
+        // Drive a second reload through the same path ...
+        std::fs::write(&path, toml("second", 2)).unwrap();
+
+        // ... and no update handler may run while the provider keeps panicking,
+        // nor may the failed reloads replace the value.
         assert_eq!(
             observed.recv_timeout(Duration::from_millis(300)),
             Err(RecvTimeoutError::Timeout)
         );
         assert_eq!(config.get().name, "old");
 
-        // A later reload from a live watcher still updates the value.
+        // A healed provider proves the watcher thread survived and still watches.
+        // An event queued by the writes above may land first, so drain until the
+        // healed value arrives.
+        healthy.store(true, Ordering::SeqCst);
         std::fs::write(&path, toml("third", 3)).unwrap();
-        assert_eq!(
-            observed.recv_timeout(Duration::from_secs(10)).unwrap(),
-            "third"
+        let mut saw_third = false;
+        for _ in 0..20 {
+            match observed.recv_timeout(Duration::from_millis(500)) {
+                Ok(name) if name == "third" => {
+                    saw_third = true;
+                    break;
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+        assert!(
+            saw_third,
+            "the healed reload never reached the update handler"
         );
     }
 
