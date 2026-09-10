@@ -1,6 +1,6 @@
 [package]
 name = "vivarium-web"
-version = "0.2.1"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -56,3 +56,8 @@ http-body-util = "0.1.5"
 parking_lot = "0.12"
 tokio = { version = "1.53.1", features = ["full"] }
 tower = { version = "0.5.3", features = ["util"] }
+
+[package.metadata.docs.rs]
+# Build the docs with every optional feature enabled, so feature-gated items
+# (drivers, extractors, utoipa, telemetry) are documented rather than missing.
+all-features = true

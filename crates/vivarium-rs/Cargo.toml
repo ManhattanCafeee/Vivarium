@@ -1,6 +1,6 @@
 [package]
 name = "vivarium-rs"
-version = "0.2.1"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -36,11 +36,11 @@ utoipa-ui = ["utoipa", "vivarium-web?/utoipa-ui"]
 telemetry = ["vivarium-web?/telemetry"]
 
 [dependencies]
-vivarium-core = { version = "0.1.2", path = "../vivarium-core" }
-vivarium-db = { version = "0.2.1", path = "../vivarium-db", optional = true, default-features = false }
-vivarium-web = { version = "0.2.1", path = "../vivarium-web", optional = true }
-vivarium-config = { version = "0.1.1", path = "../vivarium-config", optional = true }
-vivarium-macros = { version = "0.1.2", path = "../vivarium-macros" }
+vivarium-core = { version = "0.3.0", path = "../vivarium-core" }
+vivarium-db = { version = "0.3.0", path = "../vivarium-db", optional = true, default-features = false }
+vivarium-web = { version = "0.3.0", path = "../vivarium-web", optional = true }
+vivarium-config = { version = "0.3.0", path = "../vivarium-config", optional = true }
+vivarium-macros = { version = "0.3.0", path = "../vivarium-macros" }
 
 [dev-dependencies]
 anyhow = "1"
@@ -53,3 +53,8 @@ sqlx = { version = "0.9", features = ["sqlite", "runtime-tokio", "macros", "migr
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5.3", features = ["util"] }
 validator = { version = "0.20", features = ["derive"] }
+
+[package.metadata.docs.rs]
+# Build the docs with every optional feature enabled, so feature-gated items
+# (drivers, extractors, utoipa, telemetry) are documented rather than missing.
+all-features = true

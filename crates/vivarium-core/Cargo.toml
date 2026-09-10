@@ -1,6 +1,6 @@
 [package]
 name = "vivarium-core"
-version = "0.1.2"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -28,3 +28,8 @@ chrono = { version = "0.4.45", optional = true, default-features = false, featur
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 uuid = { version = "1.26.0", optional = true }
+
+[package.metadata.docs.rs]
+# Build the docs with every optional feature enabled, so feature-gated items
+# (drivers, extractors, utoipa, telemetry) are documented rather than missing.
+all-features = true
