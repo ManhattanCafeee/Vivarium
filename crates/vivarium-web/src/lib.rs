@@ -24,8 +24,10 @@
 //! always present; `errors` appears only for a failed validation; `system`
 //! appears only for an internal error while debug mode is on. The envelope
 //! `message` comes from [`Texts`] (English by default, installable once per
-//! process) while a violation's own `message` is whatever the DTO declared in
-//! its `#[validate(message = "…")]` attribute. The submitted field value is
+//! process) unless the call site supplied its own — a handler's
+//! `ApiError::not_found("no such user")` reaches the client verbatim — while a
+//! violation's own `message` is whatever the DTO declared in its
+//! `#[validate(message = "…")]` attribute. The submitted field value is
 //! never echoed back in `params`.
 //!
 //! ## Extractors

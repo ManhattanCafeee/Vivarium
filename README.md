@@ -275,8 +275,10 @@ validation failures, with a structured `errors` payload keyed by field:
   "data": null }
 ```
 
-The envelope `message` comes from the library's catalog, which is English
-until the application installs its own once at startup —
+The envelope `message` comes from the library's catalog — or straight from the
+call site when a handler supplies its own, as in `ApiError::not_found("no such
+user")`. The catalog is English until the application installs its own once at
+startup —
 `install_texts(Texts { unauthorized: "缺少会话 Cookie".into(), ..Texts::default() })`
 — and `echo_details` additionally lets a `4xx` message repeat the parser's
 detail (useful when a custom `Deserialize` error must reach the client). A
