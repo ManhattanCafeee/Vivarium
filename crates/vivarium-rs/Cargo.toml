@@ -1,6 +1,6 @@
 [package]
 name = "vivarium-rs"
-version = "0.3.2"
+version = "0.3.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -36,11 +36,11 @@ utoipa-ui = ["utoipa", "vivarium-web?/utoipa-ui"]
 telemetry = ["vivarium-web?/telemetry"]
 
 [dependencies]
-vivarium-core = { version = "0.3.2", path = "../vivarium-core" }
-vivarium-db = { version = "0.3.2", path = "../vivarium-db", optional = true, default-features = false }
-vivarium-web = { version = "0.3.2", path = "../vivarium-web", optional = true }
-vivarium-config = { version = "0.3.2", path = "../vivarium-config", optional = true }
-vivarium-macros = { version = "0.3.2", path = "../vivarium-macros" }
+vivarium-core = { version = "0.3.3", path = "../vivarium-core" }
+vivarium-db = { version = "0.3.3", path = "../vivarium-db", optional = true, default-features = false }
+vivarium-web = { version = "0.3.3", path = "../vivarium-web", optional = true }
+vivarium-config = { version = "0.3.3", path = "../vivarium-config", optional = true }
+vivarium-macros = { version = "0.3.3", path = "../vivarium-macros" }
 
 [dev-dependencies]
 anyhow = "1"
