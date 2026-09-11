@@ -55,13 +55,36 @@
 //!
 //! Collecting the paths and mounting the UIs (feature `utoipa-ui`) is the same
 //! pattern with `OpenApiRouter` and `mount`.
+//!
+//! # Localizing the document
+//!
+//! Schema descriptions are doc comments, so the library's own schemas put
+//! English prose into every document. [`localize`] hands each description to a
+//! closure after the document is assembled, so an application keeps one
+//! translation table instead of rewriting schemas one by one:
+//!
+//! ```
+//! use std::borrow::Cow;
+//! use utoipa::openapi::OpenApi;
+//! use vivarium_web::openapi;
+//!
+//! // `OpenApi::default()` has no schemas, so nothing matches; a real document
+//! // passes the descriptions of `ApiResponse`, `Page`, … to the closure.
+//! let mut api = OpenApi::default();
+//! let translated = |text: &str| match text {
+//!     "The unified response envelope." => Some(Cow::Borrowed("统一响应信封")),
+//!     _ => None,
+//! };
+//! assert_eq!(openapi::localize(&mut api, translated), 0);
+//! ```
+
+use std::borrow::Cow;
 
 #[cfg(feature = "utoipa-ui")]
 use axum::Router;
-#[cfg(feature = "utoipa-ui")]
-use utoipa::openapi::OpenApi;
+use utoipa::openapi::schema::{AdditionalProperties, ArrayItems, Schema};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
-use utoipa::openapi::{Info, InfoBuilder};
+use utoipa::openapi::{Info, InfoBuilder, OpenApi, RefOr};
 
 #[cfg(feature = "utoipa-ui")]
 pub use utoipa_axum::router::OpenApiRouter;
@@ -95,6 +118,121 @@ pub fn info(title: &str, version: &str, description: &str) -> Info {
         .version(version)
         .description(Some(description))
         .build()
+}
+
+/// Replaces schema descriptions with localized text.
+///
+/// utoipa builds a schema's `description` from its doc comment, so the
+/// library's own schemas (`ApiResponse`, `FieldViolation`, `ValidationErrors`,
+/// `Page`) carry English prose into every generated document. `translate` is
+/// called once per description found under `api`'s `components.schemas` — each
+/// nested schema included — and a `Some` result replaces it while `None`
+/// leaves it alone. Returns how many descriptions `translate` supplied a
+/// replacement for.
+///
+/// Only `components.schemas` is visited: that is where `ToSchema` derives put
+/// doc comments. Operation text (`summary`, `description`, tags) comes from
+/// the application's own `#[utoipa::path]` attributes.
+pub fn localize(
+    api: &mut OpenApi,
+    mut translate: impl FnMut(&str) -> Option<Cow<'static, str>>,
+) -> usize {
+    let Some(components) = api.components.as_mut() else {
+        return 0;
+    };
+    let mut replaced = 0;
+    for schema in components.schemas.values_mut() {
+        localize_ref_or(schema, &mut translate, &mut replaced);
+    }
+    replaced
+}
+
+/// A `$ref` carries its own (overriding) description; a schema recurses.
+fn localize_ref_or(
+    schema: &mut RefOr<Schema>,
+    translate: &mut impl FnMut(&str) -> Option<Cow<'static, str>>,
+    replaced: &mut usize,
+) {
+    match schema {
+        RefOr::Ref(reference) => {
+            // utoipa leaves `description` empty until something sets it.
+            if !reference.description.is_empty()
+                && let Some(text) = translate(&reference.description)
+            {
+                reference.description = text.into_owned();
+                *replaced += 1;
+            }
+        }
+        RefOr::T(schema) => localize_schema(schema, translate, replaced),
+    }
+}
+
+/// Walks one schema: its own description, then every child schema.
+fn localize_schema(
+    schema: &mut Schema,
+    translate: &mut impl FnMut(&str) -> Option<Cow<'static, str>>,
+    replaced: &mut usize,
+) {
+    match schema {
+        Schema::Object(object) => {
+            localize_description(&mut object.description, translate, replaced);
+            for property in object.properties.values_mut() {
+                localize_ref_or(property, translate, replaced);
+            }
+            if let Some(additional) = object.additional_properties.as_deref_mut()
+                && let AdditionalProperties::RefOr(additional) = additional
+            {
+                localize_ref_or(additional, translate, replaced);
+            }
+            if let Some(names) = object.property_names.as_deref_mut() {
+                localize_schema(names, translate, replaced);
+            }
+        }
+        Schema::Array(array) => {
+            localize_description(&mut array.description, translate, replaced);
+            if let ArrayItems::RefOrSchema(items) = &mut array.items {
+                localize_ref_or(items, translate, replaced);
+            }
+            for item in &mut array.prefix_items {
+                localize_schema(item, translate, replaced);
+            }
+        }
+        Schema::OneOf(one_of) => {
+            localize_description(&mut one_of.description, translate, replaced);
+            for item in &mut one_of.items {
+                localize_ref_or(item, translate, replaced);
+            }
+        }
+        Schema::AllOf(all_of) => {
+            localize_description(&mut all_of.description, translate, replaced);
+            for item in &mut all_of.items {
+                localize_ref_or(item, translate, replaced);
+            }
+        }
+        Schema::AnyOf(any_of) => {
+            localize_description(&mut any_of.description, translate, replaced);
+            for item in &mut any_of.items {
+                localize_ref_or(item, translate, replaced);
+            }
+        }
+        // `Schema` is `#[non_exhaustive]`: a variant added by a future utoipa
+        // needs an arm here.
+        _ => {}
+    }
+}
+
+/// Replaces a schema's own description when `translate` matches it.
+fn localize_description(
+    description: &mut Option<String>,
+    translate: &mut impl FnMut(&str) -> Option<Cow<'static, str>>,
+    replaced: &mut usize,
+) {
+    if let Some(text) = description.as_deref()
+        && let Some(replacement) = translate(text)
+    {
+        *description = Some(replacement.into_owned());
+        *replaced += 1;
+    }
 }
 
 /// Mounts the API docs onto `router` under `base`.

@@ -339,10 +339,7 @@
           "params": {
             "type": "object",
             "description": "The parameters of the failed rule (e.g. `{\"min\": 3, \"max\": 20}`).\n\nThe submitted field value is deliberately **not** echoed: `validator`\nrecords it as `params.value`, which would reflect raw input (a\npassword, a token) back to the client.",
-            "additionalProperties": {},
-            "propertyNames": {
-              "type": "string"
-            }
+            "additionalProperties": true
           }
         }
       },

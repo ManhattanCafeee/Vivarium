@@ -6,8 +6,8 @@
 //! operation has an `operation_id`, `ApiResponse<…>` becomes an
 //! `ApiResponse_*` component named `{Base}_{Child}`, both security schemes are
 //! registered, error responses declare **no** body, `info` comes from
-//! [`vivarium_web::openapi::info`], and schema descriptions stay prose (no
-//! doctest code blocks).
+//! [`vivarium_web::openapi::info`], `additionalProperties` is never the empty
+//! schema, and schema descriptions stay prose (no doctest code blocks).
 //!
 //! The whole document is compared against `tests/golden/openapi.json`; run with
 //! `UPDATE_GOLDEN=1` to regenerate it.
@@ -309,6 +309,29 @@ fn collect_descriptions(value: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
+/// Every `additionalProperties` value in `value`, at any nesting depth.
+fn collect_additional_properties<'a>(
+    value: &'a serde_json::Value,
+    out: &mut Vec<&'a serde_json::Value>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                if key == "additionalProperties" {
+                    out.push(value);
+                }
+                collect_additional_properties(value, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_additional_properties(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// `ToSchema` derives a type's whole doc comment into its schema
 /// `description`, so a doctest written above a schema type leaks into
 /// generated SDK docs.
@@ -328,6 +351,104 @@ fn schema_descriptions_contain_no_doctests() {
             "a doc-comment code block leaked into a schema description: {description}"
         );
     }
+}
+
+/// An `additionalProperties` schema is never the empty object: utoipa emits
+/// `{}` for a map whose value type carries no schema of its own
+/// (`serde_json::Value`), and the explicit boolean is the form this crate
+/// ships. The document's one free-form map must also still *be* free-form —
+/// an empty schema is not the only wrong answer, a closed object is another.
+#[test]
+fn no_schema_has_an_empty_additional_properties() {
+    let spec = spec_json();
+    let mut values = Vec::new();
+    collect_additional_properties(&spec, &mut values);
+
+    assert!(
+        values.len() >= 2,
+        "the golden schemas declare additionalProperties"
+    );
+    for value in values {
+        assert!(
+            !matches!(value, serde_json::Value::Object(fields) if fields.is_empty()),
+            "`additionalProperties: {{}}` is an empty schema: {value}"
+        );
+    }
+
+    // `FieldViolation::params` carries the failed rule's parameters, which have
+    // no schema to point at: `"additionalProperties": false` would forbid the
+    // very keys the server sends.
+    assert_eq!(
+        spec["components"]["schemas"]["FieldViolation"]["properties"]["params"]["additionalProperties"],
+        serde_json::json!(true)
+    );
+}
+
+/// `localize` hands every schema description to the closure and replaces only
+/// what it matches — the composed envelopes, the `$ref`s utoipa puts inside
+/// `oneOf`, and `vivarium-core`'s `Page` included.
+#[test]
+fn localize_replaces_the_texts_the_hook_matches() {
+    let (_, mut api) = build();
+    let before = serde_json::to_value(&api).expect("the document serializes");
+
+    let replaced = openapi::localize(&mut api, |text| match text {
+        "The unified response envelope." => Some(std::borrow::Cow::Borrowed("envelope")),
+        "One page of results." => Some(std::borrow::Cow::Borrowed("page of results")),
+        "The rows of this page." => Some(std::borrow::Cow::Borrowed("rows")),
+        "The validation violations; present only for a failed validation." => {
+            Some(std::borrow::Cow::Borrowed("violations"))
+        }
+        _ => None,
+    });
+    assert_eq!(
+        replaced, 8,
+        "three envelopes, two page texts, three validation refs"
+    );
+
+    let after = serde_json::to_value(&api).expect("the document serializes");
+    let schemas = &after["components"]["schemas"];
+    for name in [
+        "ApiResponse_User",
+        "ApiResponse_Vec_User",
+        "ApiResponse_Page_User",
+    ] {
+        assert_eq!(schemas[name]["description"], "envelope", "{name}");
+        assert_eq!(
+            schemas[name]["properties"]["errors"]["oneOf"][1]["description"], "violations",
+            "{name}"
+        );
+    }
+    assert_eq!(
+        schemas["ApiResponse_Page_User"]["properties"]["data"]["description"],
+        "page of results"
+    );
+    assert_eq!(
+        schemas["ApiResponse_Page_User"]["properties"]["data"]["properties"]["items"]["description"],
+        "rows",
+        "a description on an array schema is reached too"
+    );
+    assert_eq!(
+        schemas["FieldViolation"]["description"],
+        before["components"]["schemas"]["FieldViolation"]["description"],
+        "an unmatched description is left alone"
+    );
+
+    // A hook that matches nothing changes nothing.
+    let (_, mut untouched) = build();
+    assert_eq!(openapi::localize(&mut untouched, |_| None), 0);
+    assert_eq!(
+        serde_json::to_value(&untouched).expect("the document serializes"),
+        before
+    );
+
+    // `Some` counts even when the replacement is the text itself.
+    let (_, mut echoed) = build();
+    let echoed_count = openapi::localize(&mut echoed, |text| {
+        (text == "One page of results.")
+            .then_some(std::borrow::Cow::Borrowed("One page of results."))
+    });
+    assert_eq!(echoed_count, 1);
 }
 
 /// The golden file is the whole document; regenerate it with `UPDATE_GOLDEN=1`.

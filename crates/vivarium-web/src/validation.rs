@@ -22,6 +22,7 @@ pub struct FieldViolation {
     /// The submitted field value is deliberately **not** echoed: `validator`
     /// records it as `params.value`, which would reflect raw input (a
     /// password, a token) back to the client.
+    #[cfg_attr(feature = "utoipa", schema(additional_properties))]
     pub params: BTreeMap<String, serde_json::Value>,
 }
 

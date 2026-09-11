@@ -49,7 +49,7 @@
 //! |---|---|---|
 //! | `validation-validator` | yes | the canonical `*Varser` extractors |
 //! | `validation-garde` | no | the `Garde*` extractors |
-//! | `utoipa` | no | `ToSchema` derives, `openapi` schemes and `info` |
+//! | `utoipa` | no | `ToSchema` derives, `openapi` schemes, `info` and `localize` |
 //! | `utoipa-ui` | no | `openapi::mount` (Scalar + Swagger UI) |
 //! | `sqlx` | no | `From<sqlx::Error> for ApiError`, `ApiError::conflict_from_db` |
 //! | `telemetry` | no | `serve::telemetry::init` (stdout + JSON log files) |
