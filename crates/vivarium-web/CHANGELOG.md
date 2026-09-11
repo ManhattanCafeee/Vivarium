@@ -4,6 +4,23 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.2 — 2026-09-11
+
+### Fixed
+
+- The generated `ApiResponse_*` OpenAPI components describe the envelope with
+  the one-line summary again: `ToSchema` derives a schema's `description` from
+  the type's whole doc comment, so the rustdoc example above `ApiResponse` was
+  folded into every component and generated SDK docs showed an escaped Rust
+  snippet.
+
+### Changed
+
+- Docs: `ApiResponse`'s example moved to `ApiResponse::ok`, the constructor it
+  exercises, so the struct documentation is the description alone; a new test
+  fails if a doc-comment code block is ever folded back into a schema
+  description.
+
 ## 0.3.1 — 2026-09-10
 
 ### Fixed

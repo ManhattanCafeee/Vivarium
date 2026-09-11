@@ -3126,7 +3126,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vivarium-config"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "arc-swap",
  "figment",
@@ -3141,7 +3141,7 @@ dependencies = [
 
 [[package]]
 name = "vivarium-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "serde",
@@ -3152,7 +3152,7 @@ dependencies = [
 
 [[package]]
 name = "vivarium-db"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "log",
@@ -3166,7 +3166,7 @@ dependencies = [
 
 [[package]]
 name = "vivarium-macros"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "proc-macro2",
@@ -3180,7 +3180,7 @@ dependencies = [
 
 [[package]]
 name = "vivarium-rs"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "vivarium-web"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "argon2",
  "axum",

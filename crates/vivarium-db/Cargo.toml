@@ -1,6 +1,6 @@
 [package]
 name = "vivarium-db"
-version = "0.3.1"
+version = "0.3.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -25,8 +25,8 @@ log = "0.4.34"
 serde_json = "1.0.151"
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "json", "chrono", "uuid", "runtime-tokio"] }
 uuid = "1.26.0"
-vivarium-core = { version = "0.3.1", path = "../vivarium-core", features = ["chrono", "uuid"] }
-vivarium-macros = { version = "0.3.1", path = "../vivarium-macros" }
+vivarium-core = { version = "0.3.2", path = "../vivarium-core", features = ["chrono", "uuid"] }
+vivarium-macros = { version = "0.3.2", path = "../vivarium-macros" }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["full"] }
