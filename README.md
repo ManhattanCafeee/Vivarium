@@ -325,6 +325,15 @@ violation's own `message` is whatever the DTO declared in its
 `#[validate(message = "…")]` attribute, and the submitted field value is never
 echoed back in `params`.
 
+The generated OpenAPI document is part of the same contract, and `utoipa`
+builds each schema's `description` from its doc comment — so the library's own
+schemas (`ApiResponse`, `FieldViolation`, `ValidationErrors`, `Page`) reach
+generated SDKs in English. `vivarium_rs::openapi::localize(&mut api, |text| …)`
+(feature `utoipa`) hands every description under `components.schemas` to a
+closure and returns how many it supplied a replacement for, so one table
+localizes the whole document instead of an application rewriting schemas one
+by one; `openapi::mount` then serves the result unchanged.
+
 ## Features
 
 | Feature | Enables |
