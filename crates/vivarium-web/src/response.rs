@@ -31,14 +31,6 @@ use crate::validation::ValidationErrors;
 const OK_MESSAGE: &str = "ok";
 
 /// The unified response envelope.
-///
-/// ```
-/// use vivarium_web::response::ApiResponse;
-///
-/// let body = ApiResponse::ok(serde_json::json!({ "id": 1 }));
-/// assert_eq!(body.code, 0);
-/// assert_eq!(body.message, "ok");
-/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ApiResponse<T> {
@@ -55,6 +47,14 @@ pub struct ApiResponse<T> {
 
 impl<T> ApiResponse<T> {
     /// A success body carrying `data`.
+    ///
+    /// ```
+    /// use vivarium_web::response::ApiResponse;
+    ///
+    /// let body = ApiResponse::ok(serde_json::json!({ "id": 1 }));
+    /// assert_eq!(body.code, 0);
+    /// assert_eq!(body.message, "ok");
+    /// ```
     pub fn ok(data: T) -> Self {
         Self {
             code: 0,

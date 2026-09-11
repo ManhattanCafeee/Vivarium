@@ -133,7 +133,7 @@
     "schemas": {
       "ApiResponse_Page_User": {
         "type": "object",
-        "description": "The unified response envelope.\n\n```\nuse vivarium_web::response::ApiResponse;\n\nlet body = ApiResponse::ok(serde_json::json!({ \"id\": 1 }));\nassert_eq!(body.code, 0);\nassert_eq!(body.message, \"ok\");\n```",
+        "description": "The unified response envelope.",
         "required": [
           "code",
           "message"
@@ -213,7 +213,7 @@
       },
       "ApiResponse_User": {
         "type": "object",
-        "description": "The unified response envelope.\n\n```\nuse vivarium_web::response::ApiResponse;\n\nlet body = ApiResponse::ok(serde_json::json!({ \"id\": 1 }));\nassert_eq!(body.code, 0);\nassert_eq!(body.message, \"ok\");\n```",
+        "description": "The unified response envelope.",
         "required": [
           "code",
           "message"
@@ -259,7 +259,7 @@
       },
       "ApiResponse_Vec_User": {
         "type": "object",
-        "description": "The unified response envelope.\n\n```\nuse vivarium_web::response::ApiResponse;\n\nlet body = ApiResponse::ok(serde_json::json!({ \"id\": 1 }));\nassert_eq!(body.code, 0);\nassert_eq!(body.message, \"ok\");\n```",
+        "description": "The unified response envelope.",
         "required": [
           "code",
           "message"

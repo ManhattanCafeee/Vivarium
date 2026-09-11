@@ -5,8 +5,9 @@
 //! renders their spec and checks the parts a generated SDK depends on: every
 //! operation has an `operation_id`, `ApiResponse<…>` becomes an
 //! `ApiResponse_*` component named `{Base}_{Child}`, both security schemes are
-//! registered, error responses declare **no** body, and `info` comes from
-//! [`vivarium_web::openapi::info`].
+//! registered, error responses declare **no** body, `info` comes from
+//! [`vivarium_web::openapi::info`], and schema descriptions stay prose (no
+//! doctest code blocks).
 //!
 //! The whole document is compared against `tests/golden/openapi.json`; run with
 //! `UPDATE_GOLDEN=1` to regenerate it.
@@ -284,6 +285,49 @@ fn info_comes_from_the_helper() {
     assert_eq!(spec["info"]["version"], "0.3.0");
     assert_eq!(spec["info"]["description"], "The golden OpenAPI document.");
     assert_ne!(spec["info"]["title"], "utoipa-axum");
+}
+
+/// Every `description` string in `value`, at any nesting depth.
+fn collect_descriptions(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                if key == "description"
+                    && let Some(text) = value.as_str()
+                {
+                    out.push(text.to_owned());
+                }
+                collect_descriptions(value, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_descriptions(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `ToSchema` derives a type's whole doc comment into its schema
+/// `description`, so a doctest written above a schema type leaks into
+/// generated SDK docs.
+#[test]
+fn schema_descriptions_contain_no_doctests() {
+    let spec = spec_json();
+    let mut descriptions = Vec::new();
+    collect_descriptions(&spec["components"], &mut descriptions);
+
+    assert!(
+        descriptions.len() >= 8,
+        "the golden schemas carry descriptions"
+    );
+    for description in descriptions {
+        assert!(
+            !description.contains("```"),
+            "a doc-comment code block leaked into a schema description: {description}"
+        );
+    }
 }
 
 /// The golden file is the whole document; regenerate it with `UPDATE_GOLDEN=1`.
