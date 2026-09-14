@@ -168,7 +168,8 @@ async fn first_page(pool: &vivarium_rs::sqlx::sqlite::SqlitePool) -> sqlx::Resul
     Ok(())
 }
 
-// Partial updates and transactions stay in the same typed layer.
+// Partial updates and transactions stay in the same typed layer; the
+// transaction future is `Send` whenever `T` is, so a handler can await it.
 async fn rename_and_audit(pool: &vivarium_rs::sqlx::sqlite::SqlitePool) -> sqlx::Result<()> {
     Update::<User, UserCol>::new(1_i64)
         .set(UserCol::Name, "ada")

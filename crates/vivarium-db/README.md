@@ -54,7 +54,8 @@ async fn example(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 - **Transactions**: `with_transaction(pool, async |tx| { … })` commits on `Ok`
   and rolls back on `Err`. The closure must be an *async* closure (it holds the
   borrowed transaction across `await`), and `&mut **tx` is the executor for
-  every helper inside it.
+  every helper inside it. The future stays `Send` whenever the closure's future
+  and `T` are, so an axum handler can await it directly.
 - **Primary keys** are typed: `i64`, `u64`, `i32`, `u32`, or `String`.
   A `u64` key above `i64::MAX` is an error instead of a silent wrap.
 - **Generic helpers**: `create`, `update_by_id` (writes every non-id column),

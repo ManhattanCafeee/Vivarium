@@ -62,6 +62,42 @@ async fn commit_makes_both_inserts_visible() {
     assert_eq!(found.name, "second");
 }
 
+/// `Send` is the bound axum's `Handler` puts on any handler that awaits a
+/// transaction; `tokio::spawn` imposes the same one (`Send + 'static`) here,
+/// without dragging a web stack into this crate's tests.
+fn assert_send<T: Send>(value: T) -> T {
+    value
+}
+
+/// The closure bound is higher-ranked over both the reference and the
+/// transaction's lifetime. Pinning the transaction to the pool borrow instead
+/// (`&mut Transaction<'a, DB>` for the `'a` of `&'a Pool`) compiles in a plain
+/// `await` but leaves the closure implemented for that one region only, so
+/// this test stops compiling with "implementation of `AsyncFnOnce` is not
+/// general enough" — the failure an axum handler hits.
+#[tokio::test]
+async fn future_is_send_across_a_spawn_boundary() {
+    let pool = pool().await;
+
+    let handle = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            assert_send(with_transaction(&pool, async |tx| {
+                insert_account(&mut **tx, "spawned").await
+            }))
+            .await
+        }
+    });
+    let id = handle.await.expect("join").expect("commit");
+
+    assert_eq!(count::<Account, _>(&pool).await.expect("count"), 1);
+    let found = find_by_id::<Account, _>(&pool, id)
+        .await
+        .expect("find")
+        .expect("row");
+    assert_eq!(found.name, "spawned");
+}
+
 #[tokio::test]
 async fn rollback_discards_the_first_insert() {
     let pool = pool().await;
