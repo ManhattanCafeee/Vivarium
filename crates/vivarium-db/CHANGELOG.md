@@ -4,6 +4,15 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.4 — 2026-09-14
+
+### Fixed
+
+- `with_transaction` can be awaited inside an axum handler (or anywhere the
+  future has to be `Send`): the closure is now higher-ranked over the
+  transaction's lifetime instead of pinning it to the pool borrow, which used
+  to fail with "implementation of `AsyncFnOnce` is not general enough".
+
 ## 0.3.2 — 2026-09-11
 
 ### Changed
