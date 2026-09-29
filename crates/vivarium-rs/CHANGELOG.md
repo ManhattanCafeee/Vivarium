@@ -13,6 +13,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `vivarium-web`.
 - Re-exports of `Message`/`MessageError` (`vivarium-web`) and
   `PageNumber`/`PageSize` (`vivarium-core`).
+- Re-exports of `CookieOptionsError` (`vivarium-web`) and `openapi::InfoError`
+  (feature `utoipa`).
 
 ### Breaking
 
@@ -26,6 +28,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ApiResponse::message` are `Message`, and `ApiResponse::error`/
   `error_with_errors` take a `http::StatusCode` plus a `Message`. See the
   `vivarium-core` and `vivarium-web` changelogs.
+- The re-exported db, web and config surfaces follow their crates:
+  `RawFragmentError` is an enum, unset primary keys and blank raw fragments /
+  `LIKE` needles are rejected, `CookieOptions`' fields are private (build with
+  `CookieOptions::try_new` and the `with_*` builders; `CookieOptions::new` is
+  gone), `openapi::info` returns a `Result` and `session_cookie_scheme` takes
+  `&CookieOptions`, and `ConfigError` gained the four empty-input variants. See
+  the `vivarium-db`, `vivarium-web` and `vivarium-config` changelogs.
+- `#[derive(Entity)]` now rejects a blank `table`/`rename` literal and
+  duplicate column names at compile time, so code that used to compile but
+  produced `SELECT * FROM ""` or `INSERT INTO t ("id", "id") …` no longer
+  builds. See the `vivarium-macros` changelog.
 
 ## 0.3.4 — 2026-09-14
 

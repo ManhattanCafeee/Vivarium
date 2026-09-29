@@ -91,8 +91,8 @@ pub use response::ApiResponse;
 pub use secrets::{Digest, DigestError, Secret, SecretError, Ttl, TtlError, hash_token};
 pub use serve::{serve_with_shutdown, shutdown_signal};
 pub use session::{
-    CookieOptions, OptionalSessionCtx, SameSite, SessionAuth, SessionCtx, SessionId,
-    SessionIdError, SessionRecord, SessionStore, session_layer, should_extend,
+    CookieOptions, CookieOptionsError, OptionalSessionCtx, SameSite, SessionAuth, SessionCtx,
+    SessionId, SessionIdError, SessionRecord, SessionStore, session_layer, should_extend,
 };
 pub use texts::{Texts, install_texts, texts};
 pub use token::{

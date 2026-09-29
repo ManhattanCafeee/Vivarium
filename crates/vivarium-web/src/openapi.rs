@@ -41,13 +41,16 @@
 //!
 //! ```
 //! use utoipa::openapi::OpenApi;
+//! use vivarium_web::CookieOptions;
 //! use vivarium_web::openapi;
 //!
 //! /// Adds the crate's `info` block and the two security schemes.
 //! fn configure(mut api: OpenApi) -> OpenApi {
-//!     api.info = openapi::info("my api", "1.0.0", "What this API does.");
+//!     api.info = openapi::info("my api", "1.0.0", "What this API does.")
+//!         .expect("non-blank info");
+//!     let cookie = CookieOptions::try_new("sid").expect("non-blank cookie name");
 //!     let components = api.components.get_or_insert_with(Default::default);
-//!     components.add_security_scheme("session", openapi::session_cookie_scheme("sid"));
+//!     components.add_security_scheme("session", openapi::session_cookie_scheme(&cookie));
 //!     components.add_security_scheme("bearer", openapi::bearer_scheme());
 //!     api
 //! }
@@ -86,17 +89,20 @@ use utoipa::openapi::schema::{AdditionalProperties, ArrayItems, Schema};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::openapi::{Info, InfoBuilder, OpenApi, RefOr};
 
+use crate::session::CookieOptions;
+
 #[cfg(feature = "utoipa-ui")]
 pub use utoipa_axum::router::OpenApiRouter;
 #[cfg(feature = "utoipa-ui")]
 pub use utoipa_axum::routes;
 
-/// The session-cookie security scheme.
+/// The session-cookie security scheme for `cookie`.
 ///
-/// `cookie_name` must be the name the session middleware holds the id in, so
-/// the generated clients send the right cookie.
-pub fn session_cookie_scheme(cookie_name: &str) -> SecurityScheme {
-    SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new(cookie_name)))
+/// Pass the same [`CookieOptions`] the session middleware was built with: the
+/// scheme names the cookie the middleware reads the id from, so generated
+/// clients send the right one.
+pub fn session_cookie_scheme(cookie: &CookieOptions) -> SecurityScheme {
+    SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new(cookie.name())))
 }
 
 /// The bearer-JWT security scheme (`type: http`, `scheme: bearer`,
@@ -112,13 +118,28 @@ pub fn bearer_scheme() -> SecurityScheme {
 
 /// The spec's `info` block, replacing utoipa's defaults (which describe
 /// utoipa, not this API).
-pub fn info(title: &str, version: &str, description: &str) -> Info {
-    InfoBuilder::new()
+///
+/// # Errors
+///
+/// Returns [`InfoError`] when `title` or `version` is blank: OpenAPI requires
+/// both to be non-empty, and most tools reject or mis-render a document that
+/// does not. A blank `description` is omitted instead of being sent as `""`.
+pub fn info(title: &str, version: &str, description: &str) -> Result<Info, InfoError> {
+    if title.trim().is_empty() || version.trim().is_empty() {
+        return Err(InfoError);
+    }
+    let description = (!description.trim().is_empty()).then(|| description.to_owned());
+    Ok(InfoBuilder::new()
         .title(title)
         .version(version)
-        .description(Some(description))
-        .build()
+        .description(description)
+        .build())
 }
+
+/// Returned by [`info`] when `title` or `version` is blank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the OpenAPI `title` and `version` must not be blank")]
+pub struct InfoError;
 
 /// Replaces schema descriptions with localized text.
 ///
@@ -296,7 +317,8 @@ mod tests {
     /// The session scheme names the cookie the client must send.
     #[test]
     fn session_scheme_is_a_named_cookie() {
-        let rendered = serde_json::to_value(session_cookie_scheme("sid")).expect("serializes");
+        let cookie = CookieOptions::try_new("sid").expect("non-blank cookie name");
+        let rendered = serde_json::to_value(session_cookie_scheme(&cookie)).expect("serializes");
         assert_eq!(
             rendered,
             serde_json::json!({ "type": "apiKey", "in": "cookie", "name": "sid" })
@@ -316,13 +338,29 @@ mod tests {
     /// `info` replaces every default utoipa would otherwise emit.
     #[test]
     fn info_is_fully_specified() {
-        let info = info("my api", "1.0.0", "does things");
+        let info = info("my api", "1.0.0", "does things").expect("non-blank info");
         assert_eq!(info.title, "my api");
         assert_eq!(info.version, "1.0.0");
         assert_eq!(info.description.as_deref(), Some("does things"));
         assert!(info.license.is_none());
         assert!(info.contact.is_none());
         assert!(info != Info::default());
+    }
+
+    /// A blank `title` or `version` is rejected instead of reaching the spec.
+    #[test]
+    fn info_rejects_a_blank_title_or_version() {
+        assert!(info("", "1.0.0", "d").is_err());
+        assert!(info("  ", "1.0.0", "d").is_err());
+        assert!(info("my api", "", "d").is_err());
+        assert!(info("my api", "\t", "d").is_err());
+    }
+
+    /// A blank `description` is omitted rather than sent as `""`.
+    #[test]
+    fn blank_description_is_omitted() {
+        let info = info("my api", "1.0.0", "  ").expect("non-blank info");
+        assert!(info.description.is_none());
     }
 
     /// `mount` serves the document, both UIs, and normalizes `base`.
@@ -335,7 +373,7 @@ mod tests {
         use tower::ServiceExt;
 
         let api = OpenApiBuilder::new()
-            .info(info("mounted api", "0.3.0", "served by mount"))
+            .info(info("mounted api", "0.3.0", "served by mount").expect("non-blank info"))
             .build();
 
         // `base` is normalized: "api", "/api" and "/api/" mount the same paths.

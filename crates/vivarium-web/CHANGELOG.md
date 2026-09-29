@@ -48,9 +48,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ValidationErrors`' map is private — build it with `insert`. A blank field
   key (a `garde` struct-level rule has no field path) is stored under `"_"`,
   and the type can no longer hold `{"email": []}`.
+- `CookieOptions`' fields are private: build one with
+  `CookieOptions::try_new(name)` (empty and whitespace-only names are
+  rejected) and refine it with `with_path`/`with_domain`/`with_same_site`/
+  `with_secure`/`with_http_only`; every value is checked at construction, so a
+  blank `Name=`, `Path=`, or `Domain=` can no longer be emitted. A blank name
+  used to make the middleware miss the cookie on every request — all requests
+  anonymous while `start` kept writing unclaimable sessions — and made
+  `sets_cookie` misread the handler's response.
+- `openapi::session_cookie_scheme` takes the `CookieOptions` the session
+  middleware uses (`&CookieOptions`) instead of a free `&str` cookie name, so
+  the scheme and the middleware cannot name different cookies; and
+  `openapi::info` returns `Result<Info, InfoError>` — a blank title or version
+  is rejected (OpenAPI requires both to be non-empty) and a blank description
+  is omitted instead of being sent as `""`.
 
 ### Added
 
+- `CookieOptionsError` (re-exported at the crate root) and
+  `openapi::InfoError` — the checked-construction errors of the two builders
+  above.
 - `secrets::{Secret, Ttl, Digest}`, with `SecretError`/`TtlError`/
   `DigestError`, plus `SessionIdError` and `Argon2ParamsError` — the checked
   values the authentication surface consumes.
@@ -65,6 +82,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rendering an empty `message`.
 - `ValidationErrors` rejects the entry shapes its public map used to allow —
   a blank key or an empty violation list — on deserialization.
+- `serve::telemetry` treats a blank filter directive — `TelemetryOptions`'
+  `level: Some("")` or an empty `RUST_LOG` — as absent and falls back to
+  `info`; it used to install an empty `EnvFilter` that silently logged
+  nothing. A non-blank directive that does not parse (including `RUST_LOG`) is
+  a `TelemetryError::Filter` instead of silently falling back to `info`.
 
 ## 0.3.4 — 2026-09-14
 

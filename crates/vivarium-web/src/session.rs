@@ -22,7 +22,7 @@
 //!   `Set-Cookie` header value for the login response.
 //!
 //! `Secure`, `HttpOnly`, `SameSite=Lax` and `Path=/` are the defaults
-//! ([`CookieOptions::new`]); local development over plain HTTP opts out
+//! ([`CookieOptions::try_new`]); local development over plain HTTP opts out
 //! explicitly with [`CookieOptions::insecure`].
 //!
 //! ```no_run
@@ -75,7 +75,7 @@
 //! # async fn example() {
 //! let auth = SessionAuth::new(
 //!     MyStore::default(),
-//!     CookieOptions::new("sid"),
+//!     CookieOptions::try_new("sid").expect("non-blank cookie name"),
 //!     Ttl::try_new(Duration::from_secs(3600)).expect("non-zero TTL"),
 //!     Some(Ttl::try_new(Duration::from_secs(12 * 3600)).expect("non-zero TTL")),
 //! );
@@ -101,26 +101,20 @@ use crate::error::ApiError;
 use crate::secrets::{Digest, Ttl, generate_token};
 use crate::texts::texts;
 
-/// The cookie carrying a session id.
+/// How the session cookie is written.
 ///
 /// The defaults are the safe ones — `Path=/`, `Secure`, `HttpOnly`,
-/// `SameSite=Lax` — so a deployment only has to name the cookie. Fields are
-/// public for the rest: set `domain` for a shared parent domain, or `path` to
-/// confine the session to a subtree.
+/// `SameSite=Lax` — so a deployment only has to name the cookie. The `with_*`
+/// builders refine them, and every value they take is checked where it enters,
+/// so a blank `Name=`, `Path=`, or `Domain=` attribute can never be emitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CookieOptions {
-    /// The cookie name (e.g. `sid`).
-    pub name: String,
-    /// The `Path` attribute.
-    pub path: String,
-    /// Whether the `Secure` attribute is set.
-    pub secure: bool,
-    /// Whether the `HttpOnly` attribute is set.
-    pub http_only: bool,
-    /// The `SameSite` attribute.
-    pub same_site: SameSite,
-    /// The `Domain` attribute, when the cookie is shared across subdomains.
-    pub domain: Option<String>,
+    name: String,
+    path: String,
+    secure: bool,
+    http_only: bool,
+    same_site: SameSite,
+    domain: Option<String>,
 }
 
 impl CookieOptions {
@@ -128,15 +122,79 @@ impl CookieOptions {
     ///
     /// `path` is `/`, `secure` and `http_only` are on, and `same_site` is
     /// [`SameSite::Lax`].
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CookieOptionsError`] when `name` is empty or whitespace-only:
+    /// the middleware would never find such a cookie, so every request would
+    /// be anonymous while `start` kept writing sessions nobody can claim.
+    pub fn try_new(name: impl Into<String>) -> Result<Self, CookieOptionsError> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(CookieOptionsError { option: "name" });
+        }
+        Ok(Self {
+            name,
             path: "/".to_string(),
             secure: true,
             http_only: true,
             same_site: SameSite::Lax,
             domain: None,
+        })
+    }
+
+    /// Restricts the cookie to `path` (default `/`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CookieOptionsError`] when `path` is empty or
+    /// whitespace-only: an empty `Path=` attribute makes the browser fall back
+    /// to the request directory, silently changing the cookie's scope.
+    pub fn with_path(mut self, path: impl Into<String>) -> Result<Self, CookieOptionsError> {
+        let path = path.into();
+        if path.trim().is_empty() {
+            return Err(CookieOptionsError { option: "path" });
         }
+        self.path = path;
+        Ok(self)
+    }
+
+    /// Shares the cookie with `domain` (e.g. `example.com`), so subdomains
+    /// send it too.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CookieOptionsError`] when `domain` is empty or
+    /// whitespace-only: browsers ignore a blank `Domain=`, which would
+    /// silently restrict the cookie to the single host that set it.
+    pub fn with_domain(mut self, domain: impl Into<String>) -> Result<Self, CookieOptionsError> {
+        let domain = domain.into();
+        if domain.trim().is_empty() {
+            return Err(CookieOptionsError { option: "domain" });
+        }
+        self.domain = Some(domain);
+        Ok(self)
+    }
+
+    /// Sets the `SameSite` attribute (default [`SameSite::Lax`]).
+    #[must_use]
+    pub fn with_same_site(mut self, same_site: SameSite) -> Self {
+        self.same_site = same_site;
+        self
+    }
+
+    /// Sets the `Secure` attribute (default `true`).
+    #[must_use]
+    pub fn with_secure(mut self, secure: bool) -> Self {
+        self.secure = secure;
+        self
+    }
+
+    /// Sets the `HttpOnly` attribute (default `true`).
+    #[must_use]
+    pub fn with_http_only(mut self, http_only: bool) -> Self {
+        self.http_only = http_only;
+        self
     }
 
     /// Drops `Secure`, for local development over plain HTTP.
@@ -145,9 +203,52 @@ impl CookieOptions {
     /// over `http://`, so a development server needs this to be usable. Never
     /// ship it.
     #[must_use]
-    pub fn insecure(mut self) -> Self {
-        self.secure = false;
-        self
+    pub fn insecure(self) -> Self {
+        self.with_secure(false)
+    }
+
+    /// The cookie's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The `Path` attribute.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Whether the `Secure` attribute is set.
+    pub fn secure(&self) -> bool {
+        self.secure
+    }
+
+    /// Whether the `HttpOnly` attribute is set.
+    pub fn http_only(&self) -> bool {
+        self.http_only
+    }
+
+    /// The `SameSite` attribute.
+    pub fn same_site(&self) -> SameSite {
+        self.same_site
+    }
+
+    /// The `Domain` attribute, when the cookie is shared across subdomains.
+    pub fn domain(&self) -> Option<&str> {
+        self.domain.as_deref()
+    }
+}
+
+/// Returned by the [`CookieOptions`] builders when an option is blank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the cookie {option} must not be blank")]
+pub struct CookieOptionsError {
+    option: &'static str,
+}
+
+impl CookieOptionsError {
+    /// The rejected option: `"name"`, `"path"`, or `"domain"`.
+    pub fn option(&self) -> &'static str {
+        self.option
     }
 }
 
@@ -803,13 +904,12 @@ mod tests {
         Ttl::try_new(duration).expect("non-zero test ttl")
     }
 
+    fn cookie(name: &str) -> CookieOptions {
+        CookieOptions::try_new(name).expect("non-blank cookie name")
+    }
+
     fn auth<S: SessionStore + Clone>(store: S, absolute_ttl: Option<Duration>) -> SessionAuth<S> {
-        SessionAuth::new(
-            store,
-            CookieOptions::new("sid"),
-            ttl(TTL),
-            absolute_ttl.map(ttl),
-        )
+        SessionAuth::new(store, cookie("sid"), ttl(TTL), absolute_ttl.map(ttl))
     }
 
     fn record(
@@ -1138,31 +1238,31 @@ mod tests {
     async fn cookie_attributes_default_to_secure_http_only_lax() {
         let id = SessionId::try_new("raw").expect("non-empty");
         let secure = auth(InMemorySessionStore::default(), None);
-        let cookie = secure
+        let rendered = secure
             .set_cookie_value(&id)
             .to_str()
             .expect("ascii cookie")
             .to_string();
-        assert!(cookie.contains("sid=raw"), "{cookie}");
-        assert!(cookie.contains("Secure"), "{cookie}");
-        assert!(cookie.contains("HttpOnly"), "{cookie}");
-        assert!(cookie.contains("SameSite=Lax"), "{cookie}");
-        assert!(cookie.contains("Path=/"), "{cookie}");
-        assert_eq!(max_age(&cookie), TTL.as_secs());
-        assert!(!cookie.contains("Max-Age=0"), "{cookie}");
+        assert!(rendered.contains("sid=raw"), "{rendered}");
+        assert!(rendered.contains("Secure"), "{rendered}");
+        assert!(rendered.contains("HttpOnly"), "{rendered}");
+        assert!(rendered.contains("SameSite=Lax"), "{rendered}");
+        assert!(rendered.contains("Path=/"), "{rendered}");
+        assert_eq!(max_age(&rendered), TTL.as_secs());
+        assert!(!rendered.contains("Max-Age=0"), "{rendered}");
 
         let insecure = SessionAuth::new(
             InMemorySessionStore::default(),
-            CookieOptions::new("sid").insecure(),
+            cookie("sid").insecure(),
             ttl(TTL),
             None,
         );
-        let cookie = insecure
+        let rendered = insecure
             .set_cookie_value(&id)
             .to_str()
             .expect("ascii cookie")
             .to_string();
-        assert!(!cookie.contains("Secure"), "{cookie}");
+        assert!(!rendered.contains("Secure"), "{rendered}");
         assert_eq!(max_age(insecure.clear_cookie_value().to_str().unwrap()), 0);
     }
 
@@ -1310,7 +1410,7 @@ mod tests {
 
         let capped = SessionAuth::new(
             InMemorySessionStore::default(),
-            CookieOptions::new("sid"),
+            cookie("sid"),
             ttl(Duration::from_secs(86_400)),
             Some(ttl(Duration::from_secs(3600))),
         );
@@ -1334,6 +1434,56 @@ mod tests {
             SessionId::try_new("raw").expect("non-empty").as_str(),
             "raw"
         );
+    }
+
+    #[test]
+    fn cookie_options_reject_blank_values() {
+        assert_eq!(
+            CookieOptions::try_new("").expect_err("blank name").option(),
+            "name"
+        );
+        assert_eq!(
+            CookieOptions::try_new("  ")
+                .expect_err("blank name")
+                .option(),
+            "name"
+        );
+        assert_eq!(
+            cookie("sid")
+                .with_path(" ")
+                .expect_err("blank path")
+                .option(),
+            "path"
+        );
+        assert_eq!(
+            cookie("sid")
+                .with_domain("")
+                .expect_err("blank domain")
+                .option(),
+            "domain"
+        );
+
+        let options = cookie("sid");
+        assert_eq!(options.name(), "sid");
+        assert_eq!(options.path(), "/");
+        assert!(options.secure());
+        assert!(options.http_only());
+        assert_eq!(options.same_site(), SameSite::Lax);
+        assert_eq!(options.domain(), None);
+
+        let refined = cookie("sid")
+            .with_path("/app")
+            .expect("non-blank path")
+            .with_domain("example.com")
+            .expect("non-blank domain")
+            .with_same_site(SameSite::Strict)
+            .with_http_only(false);
+        assert_eq!(refined.path(), "/app");
+        assert_eq!(refined.domain(), Some("example.com"));
+        assert_eq!(refined.same_site(), SameSite::Strict);
+        assert!(!refined.http_only());
+        assert!(refined.secure());
+        assert!(!refined.insecure().secure());
     }
 
     #[test]

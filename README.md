@@ -247,7 +247,8 @@ where
 {
     let auth = SessionAuth::new(
         store,
-        CookieOptions::new("sid"),               // Secure; HttpOnly; SameSite=Lax; Path=/
+        // Secure; HttpOnly; SameSite=Lax; Path=/ are the defaults.
+        CookieOptions::try_new("sid").expect("non-blank cookie name"),
         Ttl::try_new(Duration::from_hours(24)).expect("non-zero TTL"),
         Some(Ttl::try_new(Duration::from_hours(24 * 7)).expect("non-zero TTL")),
     );

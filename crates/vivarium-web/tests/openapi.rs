@@ -27,7 +27,7 @@ use tower::ServiceExt;
 use utoipa::ToSchema;
 use vivarium_core::{Page, PageNumber, PageSize};
 use vivarium_web::openapi::{self, OpenApiRouter, routes};
-use vivarium_web::{ApiError, ApiResponse, Initializer, SessionCtx, Varser};
+use vivarium_web::{ApiError, ApiResponse, CookieOptions, Initializer, SessionCtx, Varser};
 
 /// The title the golden document is generated with.
 const TITLE: &str = "vivarium-web golden";
@@ -125,9 +125,11 @@ fn build() -> (Router, utoipa::openapi::OpenApi) {
         .routes(routes!(me))
         .split_for_parts();
 
-    api.info = openapi::info(TITLE, "0.3.0", "The golden OpenAPI document.");
+    api.info =
+        openapi::info(TITLE, "0.3.0", "The golden OpenAPI document.").expect("non-blank info");
+    let session_cookie = CookieOptions::try_new("sid").expect("non-blank cookie name");
     let components = api.components.get_or_insert_with(Default::default);
-    components.add_security_scheme("session", openapi::session_cookie_scheme("sid"));
+    components.add_security_scheme("session", openapi::session_cookie_scheme(&session_cookie));
     components.add_security_scheme("bearer", openapi::bearer_scheme());
 
     (router, api)

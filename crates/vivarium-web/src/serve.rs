@@ -165,7 +165,9 @@ pub mod telemetry {
         /// An `EnvFilter` directive string, such as `"info"` or
         /// `"vivarium_web=debug,info"`.
         ///
-        /// `None` reads `RUST_LOG` and falls back to `info`.
+        /// `None` — or a blank value — reads `RUST_LOG` and falls back to
+        /// `info`; a non-blank directive that does not parse is a
+        /// [`TelemetryError::Filter`].
         pub level: Option<String>,
         /// A JSON log file, rotated daily (the date is appended to the file
         /// name). `None` logs to stdout only.
@@ -226,25 +228,46 @@ pub mod telemetry {
         AlreadyInstalled,
     }
 
+    /// Builds the subscriber filter from an explicit directive and the value of
+    /// `RUST_LOG`, in that order.
+    ///
+    /// A blank directive — `Some("")`, whitespace, or an empty `RUST_LOG` — is
+    /// treated as absent: an empty `EnvFilter` disables every record, which is
+    /// never what a blank value means. A non-blank directive that does not
+    /// parse is a [`TelemetryError::Filter`], whether it came from `level` or
+    /// the environment.
+    pub(crate) fn build_filter(
+        level: Option<&str>,
+        rust_log: Option<&str>,
+    ) -> Result<EnvFilter, TelemetryError> {
+        let directive = [level, rust_log]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|directive| !directive.is_empty());
+        match directive {
+            Some(directive) => {
+                EnvFilter::try_new(directive).map_err(|source| TelemetryError::Filter {
+                    directive: directive.to_owned(),
+                    source,
+                })
+            }
+            None => Ok(EnvFilter::new("info")),
+        }
+    }
+
     /// Installs the subscriber described by `options`.
     ///
     /// # Errors
     ///
-    /// Returns [`TelemetryError::Filter`] when `level` is not a valid filter
-    /// directive, [`TelemetryError::File`] when the JSON log file cannot be
-    /// opened, and [`TelemetryError::AlreadyInstalled`] when a global
+    /// Returns [`TelemetryError::Filter`] when `level` (or `RUST_LOG`) is not a
+    /// valid filter directive, [`TelemetryError::File`] when the JSON log file
+    /// cannot be opened, and [`TelemetryError::AlreadyInstalled`] when a global
     /// subscriber already exists — including a second call, since one process
     /// has one global subscriber.
     pub fn init(options: TelemetryOptions) -> Result<TelemetryGuard, TelemetryError> {
-        let filter = match &options.level {
-            Some(directive) => {
-                EnvFilter::try_new(directive).map_err(|source| TelemetryError::Filter {
-                    directive: directive.clone(),
-                    source,
-                })?
-            }
-            None => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        };
+        let rust_log = std::env::var("RUST_LOG").ok();
+        let filter = build_filter(options.level.as_deref(), rust_log.as_deref())?;
 
         let stdout_layer = tracing_subscriber::fmt::layer().with_ansi(options.ansi);
         let (file, worker) = match &options.json_file {
@@ -423,5 +446,42 @@ mod tests {
         })
         .expect_err("the directive must be rejected");
         assert!(matches!(error, TelemetryError::Filter { .. }), "{error:?}");
+    }
+
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn blank_filter_directives_fall_back_to_info() {
+        use super::telemetry::build_filter;
+
+        for (level, rust_log) in [
+            (Some(""), None),
+            (Some("   "), None),
+            (None, Some("")),
+            (None, Some("  \t")),
+            (None, None),
+        ] {
+            let filter = build_filter(level, rust_log).expect("blank directives are absent");
+            assert!(
+                filter.to_string().contains("info"),
+                "expected the info fallback for {level:?}/{rust_log:?}, got {filter}"
+            );
+        }
+
+        // A non-blank directive still wins over the fallback.
+        let filter = build_filter(Some(""), Some("debug")).expect("a valid directive");
+        assert!(filter.to_string().contains("debug"), "{filter}");
+    }
+
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn malformed_rust_log_is_a_filter_error() {
+        use super::telemetry::{TelemetryError, build_filter};
+
+        let error = build_filter(None, Some("not a filter==")).expect_err("must be rejected");
+        assert!(matches!(error, TelemetryError::Filter { .. }), "{error:?}");
+
+        // An explicit directive takes precedence, so a malformed environment
+        // value is never parsed.
+        assert!(build_filter(Some("info"), Some("not a filter==")).is_ok());
     }
 }

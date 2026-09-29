@@ -119,6 +119,26 @@ pub enum ConfigError {
     #[error("unsupported config file extension `{0}` (expected toml, yaml, yml, or json)")]
     UnsupportedExtension(String),
 
+    /// [`ConfigOptions::new`] was given an empty path.
+    #[error("the configuration file path must not be empty")]
+    EmptyPath,
+
+    /// [`ConfigOptions::env_prefixed`] was given a blank prefix; an empty
+    /// prefix matches every variable, which would merge the whole environment
+    /// into the configuration.
+    #[error("the environment prefix must not be blank")]
+    EmptyEnvPrefix,
+
+    /// [`ConfigOptions::separator`] was given a blank separator; splitting on
+    /// an empty pattern would make figment drop every prefixed variable.
+    #[error("the environment separator must not be blank")]
+    EmptyEnvSeparator,
+
+    /// [`Config::watch`] was given a zero poll interval, which would busy-spin
+    /// the polling watcher.
+    #[error("the poll interval must not be zero")]
+    ZeroPollInterval,
+
     /// An update handler or a user-supplied [`Provider`] panicked; the panic
     /// was caught and reported here.
     ///
@@ -198,7 +218,9 @@ impl ConfigOptions {
     ///
     /// The path alone configures no source: call [`ConfigOptions::file`] (or
     /// [`ConfigOptions::file_required`]) to read it, or add other sources.
-    /// The path is still used to watch the file with [`Config::watch`].
+    /// The path is still used to watch the file with [`Config::watch`], and an
+    /// empty path is rejected with [`ConfigError::EmptyPath`] when the
+    /// configuration is loaded.
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
             path: Some(path.as_ref().to_path_buf()),
@@ -247,6 +269,10 @@ impl ConfigOptions {
     /// [`separator`](ConfigOptions::separator) set, the separator is stripped
     /// too and the remaining name is split on it to build nested keys, so
     /// `APP` + `__` reads `APP__AUTH__JWT__SECRET` as `auth.jwt.secret`.
+    ///
+    /// A blank prefix matches every variable — merging the whole environment
+    /// into the configuration — so [`Config::load_with`] rejects it with
+    /// [`ConfigError::EmptyEnvPrefix`].
     pub fn env_prefixed<P: Into<String>>(mut self, prefix: P) -> Self {
         self.env_prefix = Some(prefix.into());
         self
@@ -255,7 +281,10 @@ impl ConfigOptions {
     /// Sets the separator used to nest environment variables.
     ///
     /// Has an effect only together with [`env_prefixed`](ConfigOptions::env_prefixed),
-    /// and applies to the part of the variable name after the prefix.
+    /// and applies to the part of the variable name after the prefix. A blank
+    /// separator would make figment drop every prefixed variable, so
+    /// [`Config::load_with`] rejects it with
+    /// [`ConfigError::EmptyEnvSeparator`].
     pub fn separator<S: Into<String>>(mut self, separator: S) -> Self {
         self.separator = Some(separator.into());
         self
@@ -295,6 +324,9 @@ impl ConfigOptions {
                 Ok(None)
             };
         };
+        if path.as_os_str().is_empty() {
+            return Err(ConfigError::EmptyPath);
+        }
 
         match std::fs::canonicalize(path) {
             Ok(canonical) => Ok(Some(canonical)),
@@ -333,6 +365,14 @@ impl ConfigOptions {
         }
 
         if let Some(prefix) = &self.env_prefix {
+            if prefix.trim().is_empty() {
+                return Err(ConfigError::EmptyEnvPrefix);
+            }
+            if let Some(separator) = &self.separator
+                && separator.trim().is_empty()
+            {
+                return Err(ConfigError::EmptyEnvSeparator);
+            }
             figment = figment.merge(env_provider(prefix, self.separator.as_deref()));
         }
 
@@ -395,6 +435,9 @@ where
     /// # Errors
     ///
     /// Returns [`ConfigError::NoSource`] if `options` configure no source,
+    /// [`ConfigError::EmptyPath`] if the configured path is empty,
+    /// [`ConfigError::EmptyEnvPrefix`] or [`ConfigError::EmptyEnvSeparator`]
+    /// for a blank environment prefix or separator,
     /// [`ConfigError::MissingPath`] if a file source has no path,
     /// [`ConfigError::Io`] if a required file does not exist, and
     /// [`ConfigError::Figment`] if the merged sources cannot be extracted
@@ -587,10 +630,19 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a [`ConfigError`] if no config file path was configured, if the
-    /// watcher backend cannot be created, if the parent directory cannot be
-    /// watched, or if the watcher thread cannot be spawned.
+    /// Returns [`ConfigError::ZeroPollInterval`] when the configured poll
+    /// interval is zero, [`ConfigError::MissingPath`] if no config file path
+    /// was configured, and a [`ConfigError`] if the watcher backend cannot be
+    /// created, if the parent directory cannot be watched, or if the watcher
+    /// thread cannot be spawned.
     pub fn watch(self: Arc<Self>) -> Result<ConfigWatcher, ConfigError> {
+        if self
+            .poll_interval
+            .read()
+            .is_some_and(|interval| interval.is_zero())
+        {
+            return Err(ConfigError::ZeroPollInterval);
+        }
         let path = self.path.clone().ok_or(ConfigError::MissingPath)?;
         let parent = path
             .parent()
@@ -689,7 +741,9 @@ where
     ///
     /// The interval is read when [`Config::watch`] creates the watcher, so set
     /// it before watching. A polling watcher can miss a change that stays
-    /// inside one modification-time bucket of the watched file.
+    /// inside one modification-time bucket of the watched file. A zero
+    /// interval would busy-spin the watcher, so it is rejected with
+    /// [`ConfigError::ZeroPollInterval`].
     pub fn poll_interval(&self, interval: Duration) -> &Self {
         *self.poll_interval.write() = Some(interval);
         self
@@ -1020,6 +1074,50 @@ mod tests {
             .err()
             .expect("no path");
         assert!(matches!(err, ConfigError::MissingPath), "{err:?}");
+    }
+
+    #[test]
+    fn empty_path_is_rejected() {
+        let err = Config::<AppConfig>::load_with(ConfigOptions::new("").defaults(&AppConfig {
+            name: "x".into(),
+            port: 1,
+        }))
+        .err()
+        .expect("an empty path cannot be loaded");
+        assert!(matches!(err, ConfigError::EmptyPath), "{err:?}");
+    }
+
+    #[test]
+    fn blank_env_options_are_rejected() {
+        for prefix in ["", "   "] {
+            let err = Config::<AppConfig>::load_with(
+                ConfigOptions::new("config.toml").env_prefixed(prefix),
+            )
+            .err()
+            .expect("a blank prefix cannot be loaded");
+            assert!(matches!(err, ConfigError::EmptyEnvPrefix), "{err:?}");
+        }
+
+        for separator in ["", "  "] {
+            let err = Config::<AppConfig>::load_with(
+                ConfigOptions::new("config.toml")
+                    .env_prefixed("APP")
+                    .separator(separator),
+            )
+            .err()
+            .expect("a blank separator cannot be loaded");
+            assert!(matches!(err, ConfigError::EmptyEnvSeparator), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn zero_poll_interval_is_rejected() {
+        let (_dir, path) = config_file(&toml("hello", 8080));
+        let config: Config<AppConfig> = Config::load(&path).expect("load");
+        config.poll_interval(Duration::ZERO);
+
+        let err = Arc::new(config).watch().expect_err("zero interval");
+        assert!(matches!(err, ConfigError::ZeroPollInterval), "{err:?}");
     }
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]

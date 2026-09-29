@@ -4,6 +4,22 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- Blank values no longer silently disable a source or spin the watcher:
+  `ConfigOptions::new("")`, a blank `env_prefixed` prefix, a blank `separator`
+  and a zero `Config::poll_interval` are reported when the configuration is
+  loaded (or when `watch` starts) as `ConfigError::EmptyPath`,
+  `ConfigError::EmptyEnvPrefix`, `ConfigError::EmptyEnvSeparator` and
+  `ConfigError::ZeroPollInterval` — four new variants. Previously an empty
+  prefix merged the whole environment into the configuration, an empty
+  separator made figment drop every prefixed variable, an empty path resolved
+  to the working directory (surfacing as a misleading
+  `UnsupportedExtension("<none>")`, or a watcher that never matched), and a
+  zero interval busy-spun the polling watcher.
+
 ## 0.3.4 — 2026-09-14
 
 ### Changed
