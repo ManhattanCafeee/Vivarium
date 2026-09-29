@@ -3,10 +3,19 @@
 //! The extractors in [`crate::varser`] translate whatever their backend
 //! produced (`validator` or `garde`) into these two types, so the wire format
 //! of `errors` does not depend on the backend that raised it.
+//!
+//! [`ValidationErrors`] keeps its map private, and every entry holds at least
+//! one violation because [`ValidationErrors::insert`] only ever pushes — the
+//! bad shapes a public map allowed (`{"email": []}`, a blank field key) cannot
+//! be built. An empty report (`{}`) is legal and is what a backend that produced
+//! no violations yields. Deserialization enforces the same entry shape and
+//! rejects a blank field key or an empty violation list.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+
+use crate::message::Message;
 
 /// One failed rule for one field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16,7 +25,8 @@ pub struct FieldViolation {
     pub code: String,
     /// The message the DTO declared for this rule, when it declared one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    pub message: Option<Message>,
     /// The parameters of the failed rule (e.g. `{"min": 3, "max": 20}`).
     ///
     /// The submitted field value is deliberately **not** echoed: `validator`
@@ -31,9 +41,36 @@ pub struct FieldViolation {
 /// Keys are flattened field paths: `email` for a top-level field,
 /// `profile.email` for a nested struct field, `items[0].name` for a field of a
 /// list element. The map is ordered, so the serialized body is stable.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct ValidationErrors(pub BTreeMap<String, Vec<FieldViolation>>);
+pub struct ValidationErrors(BTreeMap<String, Vec<FieldViolation>>);
+
+impl<'de> Deserialize<'de> for ValidationErrors {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let raw = BTreeMap::<String, Vec<FieldViolation>>::deserialize(deserializer)?;
+        if let Some((field, _)) = raw
+            .iter()
+            .find(|(field, violations)| field.trim().is_empty() || violations.is_empty())
+        {
+            return Err(D::Error::custom(format!(
+                "invalid validation errors for field `{field}`"
+            )));
+        }
+        Ok(Self(raw))
+    }
+}
+
+/// The field key a report-level (non-field) failure is stored under.
+///
+/// `garde` reports struct-level rules with an empty path; `validator` always
+/// names a field. Storing those under `"_"` keeps every key a usable field
+/// path.
+const ROOT_FIELD: &str = "_";
 
 impl ValidationErrors {
     /// An empty report.
@@ -52,8 +89,17 @@ impl ValidationErrors {
     }
 
     /// Records `violation` for `field`, keeping any violations already there.
+    ///
+    /// A blank `field` is stored under `"_"` (a report-level failure); an empty
+    /// field entry can never be created, only appended to.
     pub fn insert(&mut self, field: impl Into<String>, violation: FieldViolation) {
-        self.0.entry(field.into()).or_default().push(violation);
+        let field = field.into();
+        let field = if field.trim().is_empty() {
+            ROOT_FIELD.to_string()
+        } else {
+            field
+        };
+        self.0.entry(field).or_default().push(violation);
     }
 
     /// The violations recorded for `field`.
@@ -86,6 +132,7 @@ mod validator_backend {
     use validator::{ValidationError, ValidationErrorsKind};
 
     use super::{FieldViolation, ValidationErrors};
+    use crate::message::Message;
 
     impl From<validator::ValidationErrors> for ValidationErrors {
         fn from(errors: validator::ValidationErrors) -> Self {
@@ -140,11 +187,15 @@ mod validator_backend {
     /// `validator` adds the raw field content as `params.value` for most
     /// rules; reflecting it back would leak whatever the client sent (a
     /// password, a token) in a 422 body, so it is dropped here. Everything
-    /// else (`code`, `message`, the rule's own parameters) is copied verbatim.
+    /// else (`code`, `message`, the rule's own parameters) is copied verbatim,
+    /// except that a blank declared message becomes no message at all.
     fn violation(error: &ValidationError) -> FieldViolation {
         FieldViolation {
             code: error.code.to_string(),
-            message: error.message.as_ref().map(ToString::to_string),
+            message: error
+                .message
+                .as_ref()
+                .and_then(|text| Message::try_new(text.to_string()).ok()),
             params: error
                 .params
                 .iter()
@@ -165,7 +216,7 @@ impl From<garde::Report> for ValidationErrors {
                 path.to_string(),
                 FieldViolation {
                     code: GARDE_VIOLATION_CODE.to_string(),
-                    message: Some(error.message().to_string()),
+                    message: Message::try_new(error.message().to_string()).ok(),
                     params: BTreeMap::new(),
                 },
             );
@@ -214,7 +265,7 @@ mod validator_tests {
         };
 
         let report = ValidationErrors::from(value.validate().expect_err("invalid payload"));
-        let mut fields = report.0.keys().cloned().collect::<Vec<_>>();
+        let mut fields = report.iter().map(|(field, _)| field).collect::<Vec<_>>();
         fields.sort();
 
         assert_eq!(
@@ -301,5 +352,61 @@ mod garde_tests {
 
         let nested = report.get("items[0].name").expect("nested violation");
         assert!(!nested.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn violation() -> FieldViolation {
+        FieldViolation {
+            code: "invalid".to_string(),
+            message: None,
+            params: BTreeMap::new(),
+        }
+    }
+
+    /// A report-level failure (an empty `garde` path) is stored under `_`, so
+    /// every key stays a usable field path.
+    #[test]
+    fn blank_field_keys_are_stored_under_the_root_marker() {
+        let mut errors = ValidationErrors::new();
+        errors.insert("", violation());
+
+        assert!(errors.get(ROOT_FIELD).is_some());
+        assert!(errors.get("").is_none());
+        assert_eq!(errors.iter().next().map(|(field, _)| field), Some("_"));
+    }
+
+    /// The wire shapes a public map used to allow are rejected on the way in.
+    #[test]
+    fn malformed_payloads_are_rejected_on_deserialize() {
+        assert!(serde_json::from_str::<ValidationErrors>(r#"{"email": []}"#).is_err());
+        assert!(
+            serde_json::from_str::<ValidationErrors>(r#"{"": [{ "code": "x", "params": {} }]}"#)
+                .is_err()
+        );
+
+        // An empty report is a legal shape, and a well-formed entry round-trips.
+        assert!(serde_json::from_str::<ValidationErrors>("{}").is_ok());
+        let mut errors = ValidationErrors::new();
+        errors.insert(
+            "email",
+            FieldViolation {
+                code: "email".to_string(),
+                message: Message::try_new("not an email").ok(),
+                params: BTreeMap::new(),
+            },
+        );
+        let rendered = serde_json::to_string(&errors).expect("serializes");
+        assert_eq!(
+            rendered,
+            r#"{"email":[{"code":"email","message":"not an email","params":{}}]}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ValidationErrors>(&rendered).expect("round-trips"),
+            errors
+        );
     }
 }

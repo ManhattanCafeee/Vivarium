@@ -4,6 +4,29 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Breaking
+
+- `Pagination`'s `page`/`per_page` fields are `PageNumber`/`PageSize` now, and
+  the same types back `Page`'s `page`/`per_page`. Both clamp on every
+  construction path (`new`, `From<u32>` — `p.into()` — and deserialization), so
+  a zero or out-of-range value is unrepresentable: `Pagination::normalize` is
+  gone and `limit_offset`/`Page::pages` lost their defensive branches. The JSON
+  shape is unchanged (`page`/`per_page` stay plain numbers) and
+  `Pagination::new(u32, u32)` keeps its signature.
+
+### Added
+
+- `PageNumber` (`1..=1_000_000`) and `PageSize` (`1..=100`; `0` becomes
+  `PageSize::DEFAULT`), each with `new`, `get`, `From<u32>`, `Into<u32>` and
+  `Display`.
+
+### Changed
+
+- The `Page` schema advertises `minimum: 1` for `page`/`per_page`, matching the
+  hand-written `IntoParams` impl (it used to say `0`).
+
 ## 0.3.4 — 2026-09-14
 
 ### Changed

@@ -56,12 +56,17 @@ back in `params`.
 ## What's inside
 
 - `response::ApiResponse<T>` — the envelope; `ApiResponse::ok` / `error` /
-  `error_with_errors`, always HTTP 200 (use `(StatusCode, ApiResponse<T>)` when
-  you need another status)
+  `error_with_errors` (the error constructors take a `http::StatusCode` and a
+  `Message`), always HTTP 200 (use `(StatusCode, ApiResponse<T>)` when you need
+  another status)
 - `error::ApiError` + `ErrorKind` — one error type, nine kinds
   (`BadRequest`, `DataParse`, `Validation`, `Unauthorized`, `Forbidden`,
   `NotFound`, `Conflict`, `TooManyRequests`, `Internal`), a per-kind
-  constructor, `bail!`, and a `Result<T, E = ApiError>` alias
+  constructor, `bail!`, and a `Result<T, E = ApiError>` alias; a blank explicit
+  message falls back to the catalog text
+- `message::Message` — a non-blank client-facing message (`Message::try_new`),
+  the field type of the catalog, of `ApiResponse::message` and of
+  `FieldViolation::message`
 - `texts::{Texts, install_texts}` — the message catalog, installable once per
   process; `Texts::echo_details` decides whether a 4xx parse failure repeats
   the upstream detail

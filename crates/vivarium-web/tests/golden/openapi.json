@@ -178,13 +178,13 @@
                 "type": "integer",
                 "format": "int32",
                 "description": "The (normalized) page number this page represents.",
-                "minimum": 0
+                "minimum": 1
               },
               "per_page": {
                 "type": "integer",
                 "format": "int32",
                 "description": "The (normalized) page size.",
-                "minimum": 0
+                "minimum": 1
               },
               "total": {
                 "type": "integer",

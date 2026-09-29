@@ -25,7 +25,7 @@ use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 use utoipa::ToSchema;
-use vivarium_core::Page;
+use vivarium_core::{Page, PageNumber, PageSize};
 use vivarium_web::openapi::{self, OpenApiRouter, routes};
 use vivarium_web::{ApiError, ApiResponse, Initializer, SessionCtx, Varser};
 
@@ -76,8 +76,8 @@ async fn page_users() -> Result<axum::Json<ApiResponse<Page<User>>>, ApiError> {
     Ok(axum::Json(ApiResponse::ok(Page {
         items: Vec::new(),
         total: 0,
-        page: 1,
-        per_page: 20,
+        page: PageNumber::new(1),
+        per_page: PageSize::new(20),
     })))
 }
 

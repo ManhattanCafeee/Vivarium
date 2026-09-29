@@ -5,14 +5,14 @@
 //! [`ApiError::database`](crate::ApiError::database) — come from [`Texts`].
 //! [`Texts::default`] is entirely English; an application that needs another
 //! language builds a catalog and installs it once, at startup, before serving
-//! traffic:
+//! traffic. Every field is a [`Message`], which rejects empty and
+//! whitespace-only text, so a catalog can never render a blank `message`:
 //!
 //! ```
-//! use std::borrow::Cow;
-//! use vivarium_web::texts::{Texts, install_texts};
+//! use vivarium_web::texts::{Message, Texts, install_texts};
 //!
 //! let localized = Texts {
-//!     unauthorized: Cow::Borrowed("session cookie required"),
+//!     unauthorized: Message::try_new("session cookie required").expect("non-blank"),
 //!     echo_details: true,
 //!     ..Texts::default()
 //! };
@@ -29,44 +29,48 @@
 //! [`PermissionSet::require`](crate::authz::PermissionSet::require), and the
 //! refresh-token 401 ([`invalid_refresh`](Texts::invalid_refresh)).
 
-use std::borrow::Cow;
 use std::sync::OnceLock;
+
+/// The field type of every catalog entry, re-exported here because that is
+/// where a catalog author looks for it.
+pub use crate::message::Message;
 
 /// The process-wide message catalog.
 ///
 /// Every field defaults to English. Fields are public so a catalog can be
-/// written with struct-update syntax (`..Texts::default()`).
+/// written with struct-update syntax (`..Texts::default()`); each one is a
+/// [`Message`], built with [`Message::try_new`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Texts {
     /// Message of a [`ErrorKind::DataParse`](crate::ErrorKind::DataParse)
     /// error: the request body could not be deserialized.
-    pub data_parse: Cow<'static, str>,
+    pub data_parse: Message,
     /// Message of a [`ErrorKind::BadRequest`](crate::ErrorKind::BadRequest)
     /// error: the request is malformed.
-    pub bad_request: Cow<'static, str>,
+    pub bad_request: Message,
     /// Message of a [`ErrorKind::Validation`](crate::ErrorKind::Validation)
     /// error; the details travel in the structured `errors` field.
-    pub validation: Cow<'static, str>,
+    pub validation: Message,
     /// Message of a [`ErrorKind::Unauthorized`](crate::ErrorKind::Unauthorized)
     /// error.
-    pub unauthorized: Cow<'static, str>,
+    pub unauthorized: Message,
     /// Message of a [`ErrorKind::Forbidden`](crate::ErrorKind::Forbidden) error.
-    pub forbidden: Cow<'static, str>,
+    pub forbidden: Message,
     /// Message of a [`ErrorKind::NotFound`](crate::ErrorKind::NotFound) error.
-    pub not_found: Cow<'static, str>,
+    pub not_found: Message,
     /// Message of a [`ErrorKind::Conflict`](crate::ErrorKind::Conflict) error.
-    pub conflict: Cow<'static, str>,
+    pub conflict: Message,
     /// Message of a [`ErrorKind::TooManyRequests`](crate::ErrorKind::TooManyRequests) error.
-    pub too_many_requests: Cow<'static, str>,
+    pub too_many_requests: Message,
     /// Message of the 401 a rejected refresh token produces: unknown, expired,
     /// already consumed, or raced by a concurrent rotation.
-    pub invalid_refresh: Cow<'static, str>,
+    pub invalid_refresh: Message,
     /// Message of a [`ErrorKind::Internal`](crate::ErrorKind::Internal) error
     /// that carries no further detail.
-    pub internal: Cow<'static, str>,
+    pub internal: Message,
     /// Message of an [`ErrorKind::Internal`](crate::ErrorKind::Internal) error
     /// caused by the database.
-    pub database: Cow<'static, str>,
+    pub database: Message,
     /// Whether a client-facing `message` may repeat the raw upstream detail
     /// (a `serde` / `axum` rejection text) of a 4xx parse failure.
     ///
@@ -80,20 +84,23 @@ pub struct Texts {
 
 impl Default for Texts {
     fn default() -> Self {
-        Self {
-            data_parse: Cow::Borrowed("invalid request data"),
-            bad_request: Cow::Borrowed("invalid request"),
-            validation: Cow::Borrowed("validation failed"),
-            unauthorized: Cow::Borrowed("authentication required"),
-            forbidden: Cow::Borrowed("permission denied"),
-            not_found: Cow::Borrowed("not found"),
-            conflict: Cow::Borrowed("conflict"),
-            too_many_requests: Cow::Borrowed("too many requests"),
-            invalid_refresh: Cow::Borrowed("invalid or expired refresh token"),
-            internal: Cow::Borrowed("internal error"),
-            database: Cow::Borrowed("database error"),
+        // Const-evaluated, so `Message::literal`'s blank check runs at compile
+        // time: a blank default is a build error, not a runtime one.
+        const ENGLISH: Texts = Texts {
+            data_parse: Message::literal("invalid request data"),
+            bad_request: Message::literal("invalid request"),
+            validation: Message::literal("validation failed"),
+            unauthorized: Message::literal("authentication required"),
+            forbidden: Message::literal("permission denied"),
+            not_found: Message::literal("not found"),
+            conflict: Message::literal("conflict"),
+            too_many_requests: Message::literal("too many requests"),
+            invalid_refresh: Message::literal("invalid or expired refresh token"),
+            internal: Message::literal("internal error"),
+            database: Message::literal("database error"),
             echo_details: false,
-        }
+        };
+        ENGLISH
     }
 }
 
@@ -112,7 +119,8 @@ static TEXTS: OnceLock<Texts> = OnceLock::new();
 ///
 /// Call this at startup, before serving requests. Returns
 /// [`TextsAlreadySet`] when a catalog was already installed; the first one
-/// stays in place.
+/// stays in place. Every field is a [`Message`], so an installed catalog cannot
+/// hold a blank message.
 ///
 /// # Errors
 ///

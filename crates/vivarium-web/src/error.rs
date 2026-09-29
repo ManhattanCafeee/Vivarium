@@ -21,6 +21,7 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
+use crate::message::Message;
 use crate::response::envelope;
 use crate::texts::texts;
 use crate::validation::ValidationErrors;
@@ -105,7 +106,7 @@ impl fmt::Display for ErrorKind {
 #[derive(Debug)]
 pub struct ApiError {
     kind: ErrorKind,
-    message: Option<Cow<'static, str>>,
+    message: Option<Message>,
     errors: Option<ValidationErrors>,
     source: Option<Box<dyn Error + Send + Sync>>,
 }
@@ -116,10 +117,16 @@ impl ApiError {
     /// Prefer the per-kind constructors, which document their status code;
     /// this exists for [`bail!`](crate::bail) and for code that dispatches on a
     /// kind it received.
+    ///
+    /// An empty or whitespace-only message is dropped, and [`message`] then
+    /// answers with the catalog text for `kind` instead of rendering a blank
+    /// `message` to the client.
+    ///
+    /// [`message`]: ApiError::message
     pub fn new(kind: ErrorKind, message: impl Into<Cow<'static, str>>) -> Self {
         Self {
             kind,
-            message: Some(message.into()),
+            message: Message::try_new(message).ok(),
             errors: None,
             source: None,
         }
@@ -223,10 +230,10 @@ impl ApiError {
     }
 
     /// The client-facing message: the explicit one, or the catalog default of
-    /// this kind.
+    /// this kind. Never empty.
     pub fn message(&self) -> &str {
         match &self.message {
-            Some(message) => message,
+            Some(message) => message.as_str(),
             None => default_message(self.kind),
         }
     }
@@ -287,15 +294,15 @@ fn log_failure(kind: ErrorKind, source: Option<&(dyn Error + Send + Sync)>) {
 fn default_message(kind: ErrorKind) -> &'static str {
     let catalog = texts();
     match kind {
-        ErrorKind::BadRequest => catalog.bad_request.as_ref(),
-        ErrorKind::DataParse => catalog.data_parse.as_ref(),
-        ErrorKind::Validation => catalog.validation.as_ref(),
-        ErrorKind::Unauthorized => catalog.unauthorized.as_ref(),
-        ErrorKind::Forbidden => catalog.forbidden.as_ref(),
-        ErrorKind::NotFound => catalog.not_found.as_ref(),
-        ErrorKind::Conflict => catalog.conflict.as_ref(),
-        ErrorKind::TooManyRequests => catalog.too_many_requests.as_ref(),
-        ErrorKind::Internal => catalog.internal.as_ref(),
+        ErrorKind::BadRequest => catalog.bad_request.as_str(),
+        ErrorKind::DataParse => catalog.data_parse.as_str(),
+        ErrorKind::Validation => catalog.validation.as_str(),
+        ErrorKind::Unauthorized => catalog.unauthorized.as_str(),
+        ErrorKind::Forbidden => catalog.forbidden.as_str(),
+        ErrorKind::NotFound => catalog.not_found.as_str(),
+        ErrorKind::Conflict => catalog.conflict.as_str(),
+        ErrorKind::TooManyRequests => catalog.too_many_requests.as_str(),
+        ErrorKind::Internal => catalog.internal.as_str(),
     }
 }
 
@@ -336,20 +343,20 @@ impl Error for Detail {}
 /// Builds a 4xx error from an upstream parsing detail.
 ///
 /// The detail becomes the `message` only while
-/// [`Texts::echo_details`](crate::texts::Texts::echo_details) is enabled;
-/// otherwise the catalog's text for `kind` is used and the detail stays in the
-/// error source, where it is logged. A 4xx never carries a `system` field —
-/// only [`ErrorKind::Internal`] does, and only in debug mode.
+/// [`Texts::echo_details`](crate::texts::Texts::echo_details) is enabled and the
+/// detail is non-blank; otherwise the catalog's text for `kind` is used and the
+/// detail stays in the error source, where it is logged. A 4xx never carries a
+/// `system` field — only [`ErrorKind::Internal`] does, and only in debug mode.
 pub(crate) fn detail(kind: ErrorKind, detail: impl Into<String>) -> ApiError {
     let detail = detail.into();
     let message = if texts().echo_details {
-        Cow::Owned(detail.clone())
+        Message::try_new(detail.clone()).ok()
     } else {
-        Cow::Borrowed(default_message(kind))
+        None
     };
     ApiError {
         kind,
-        message: Some(message),
+        message,
         errors: None,
         source: Some(Box::new(Detail(detail))),
     }
@@ -539,19 +546,33 @@ mod tests {
     #[test]
     fn catalog_supplies_missing_messages() {
         let validation = ApiError::validation(ValidationErrors::new());
-        assert_eq!(validation.message(), texts().validation);
+        assert_eq!(validation.message(), texts().validation.as_str());
         assert_eq!(validation.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert!(validation.errors().is_some());
 
         let internal = ApiError::internal("boom");
-        assert_eq!(internal.message(), texts().internal);
+        assert_eq!(internal.message(), texts().internal.as_str());
         assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(internal.to_string(), texts().internal);
+        assert_eq!(internal.to_string(), texts().internal.as_str());
         assert!(internal.errors().is_none());
 
         let database = ApiError::database("driver exploded");
-        assert_eq!(database.message(), texts().database);
+        assert_eq!(database.message(), texts().database.as_str());
         assert_eq!(database.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// A blank explicit message is dropped, so the catalog text is used
+    /// instead of rendering `"message": ""`.
+    #[test]
+    fn blank_messages_fall_back_to_the_catalog() {
+        assert_eq!(
+            ApiError::new(ErrorKind::NotFound, "").message(),
+            texts().not_found.as_str()
+        );
+        assert_eq!(
+            ApiError::bad_request("   ").message(),
+            texts().bad_request.as_str()
+        );
     }
 
     /// The rendered error body is the response envelope, including `data: null`.
@@ -612,7 +633,7 @@ mod tests {
             "email",
             FieldViolation {
                 code: "email".to_string(),
-                message: Some("not an email".to_string()),
+                message: Message::try_new("not an email").ok(),
                 params: Default::default(),
             },
         );
@@ -665,7 +686,7 @@ mod tests {
     fn from_table_maps_sources() {
         let io = ApiError::from(std::io::Error::other("disk on fire"));
         assert_eq!(io.kind(), ErrorKind::Internal);
-        assert_eq!(io.message(), texts().internal);
+        assert_eq!(io.message(), texts().internal.as_str());
 
         let json = ApiError::from(
             serde_json::from_str::<serde_json::Value>("{").expect_err("invalid json"),
@@ -674,7 +695,7 @@ mod tests {
         assert_eq!(json.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             json.message(),
-            texts().data_parse,
+            texts().data_parse.as_str(),
             "details are not echoed by default"
         );
 
@@ -757,7 +778,7 @@ mod tests {
 
         let other = ApiError::from(sqlx::Error::Protocol("bad frame".to_string()));
         assert_eq!(other.kind(), ErrorKind::Internal);
-        assert_eq!(other.message(), texts().database);
+        assert_eq!(other.message(), texts().database.as_str());
 
         let mapped = ApiError::conflict_from_db(
             sqlx::Error::Database(Box::new(UniqueViolation)),

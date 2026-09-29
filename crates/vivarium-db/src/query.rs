@@ -268,9 +268,9 @@ where
         DB::scalar_i64(Self::count_prefix(), self.steps.clone(), String::new(), db).await
     }
 
-    /// Runs the query as one page: normalizes `pagination`, counts the total,
-    /// and fetches exactly one page's rows (the query's own limit/offset are
-    /// replaced by the pagination's).
+    /// Runs the query as one page: counts the total and fetches exactly one
+    /// page's rows (the query's own limit/offset are replaced by the
+    /// pagination's, which is already normalized by construction).
     ///
     /// The executor must be `Copy` because two queries run against it; pass a
     /// reference (e.g. `&pool`).
@@ -280,12 +280,11 @@ where
     /// [`paginate_with_total`](Query::paginate_with_total) instead. Hand the
     /// transaction connection over as `&mut **tx`, the convention of
     /// [`with_transaction`](crate::with_transaction).
-    pub async fn paginate<'e, E>(&self, mut pagination: Pagination, db: E) -> Result<Page<T>, Error>
+    pub async fn paginate<'e, E>(&self, pagination: Pagination, db: E) -> Result<Page<T>, Error>
     where
         E: Executor<'e, Database = DB> + Copy + 'e,
         T: for<'r> FromRow<'r, DB::Row> + Send + Unpin,
     {
-        pagination.normalize();
         let total = self.count(db).await?.max(0) as u64;
         let (limit, offset) = pagination.limit_offset();
         let suffix = format!("{} LIMIT {limit} OFFSET {offset}", self.order_tail());
@@ -306,7 +305,7 @@ where
     /// the right default otherwise.
     pub async fn paginate_with_total<'e, E>(
         &self,
-        mut pagination: Pagination,
+        pagination: Pagination,
         total: u64,
         db: E,
     ) -> Result<Page<T>, Error>
@@ -314,7 +313,6 @@ where
         E: Executor<'e, Database = DB> + 'e,
         T: for<'r> FromRow<'r, DB::Row> + Send + Unpin,
     {
-        pagination.normalize();
         let (limit, offset) = pagination.limit_offset();
         let suffix = format!("{} LIMIT {limit} OFFSET {offset}", self.order_tail());
         let items = DB::fetch_all(self.select_prefix(), self.steps.clone(), suffix, db).await?;

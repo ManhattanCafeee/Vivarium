@@ -11,6 +11,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Re-exports of `Secret`, `Ttl`, `Digest`, `SecretError`, `TtlError`,
   `DigestError`, `SessionIdError` and `Argon2ParamsError` from
   `vivarium-web`.
+- Re-exports of `Message`/`MessageError` (`vivarium-web`) and
+  `PageNumber`/`PageSize` (`vivarium-core`).
 
 ### Breaking
 
@@ -19,6 +21,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Secret`, `RefreshTokenManager::new` / `SessionAuth::new` take `Ttl` values,
   and `SessionStore` / `RefreshTokenStore` take `&Digest`. See
   `vivarium-web`'s changelog for the full list.
+- The re-exported pagination and message types follow their crates:
+  `Pagination`/`Page` carry `PageNumber`/`PageSize`, `Texts` fields and
+  `ApiResponse::message` are `Message`, and `ApiResponse::error`/
+  `error_with_errors` take a `http::StatusCode` plus a `Message`. See the
+  `vivarium-core` and `vivarium-web` changelogs.
 
 ## 0.3.4 — 2026-09-14
 

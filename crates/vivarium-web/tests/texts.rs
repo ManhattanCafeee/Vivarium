@@ -8,8 +8,6 @@
 
 #![cfg(feature = "validation-validator")]
 
-use std::borrow::Cow;
-
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -18,7 +16,7 @@ use axum::routing::get;
 use http_body_util::BodyExt;
 use serde::Deserialize;
 use tower::ServiceExt;
-use vivarium_web::texts::{Texts, install_texts, texts};
+use vivarium_web::texts::{Message, Texts, install_texts, texts};
 use vivarium_web::{ApiError, Initializer, PathVarser, SessionCtx, debug_mode, install_debug_mode};
 
 /// A path id that rejects non-numeric values with a custom message.
@@ -72,12 +70,12 @@ impl Initializer for CreateReq {}
 
 fn catalog() -> Texts {
     Texts {
-        data_parse: Cow::Borrowed("payload unreadable"),
-        bad_request: Cow::Borrowed("bad parameter"),
-        validation: Cow::Borrowed("fields rejected"),
-        unauthorized: Cow::Borrowed("no session"),
-        internal: Cow::Borrowed("server exploded"),
-        database: Cow::Borrowed("storage exploded"),
+        data_parse: Message::try_new("payload unreadable").expect("non-empty literal"),
+        bad_request: Message::try_new("bad parameter").expect("non-empty literal"),
+        validation: Message::try_new("fields rejected").expect("non-empty literal"),
+        unauthorized: Message::try_new("no session").expect("non-empty literal"),
+        internal: Message::try_new("server exploded").expect("non-empty literal"),
+        database: Message::try_new("storage exploded").expect("non-empty literal"),
         echo_details: true,
         ..Texts::default()
     }

@@ -4,6 +4,15 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- `Pagination`/`Page` carry `PageNumber`/`PageSize` values now (re-exported
+  here), and `Query::paginate`/`paginate_with_total` no longer call
+  `Pagination::normalize` — the field types clamp at construction, so the
+  pagination a caller passes in is already normalized.
+
 ## 0.3.4 — 2026-09-14
 
 ### Fixed

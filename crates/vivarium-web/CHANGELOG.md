@@ -35,12 +35,36 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   through the `m_cost()`/`t_cost()`/`p_cost()` accessors. Zeroed parameters
   used to surface as a 500 on the first `hash()`/login and made `needs_rehash`
   answer "no upgrade" forever.
+- `Texts`' fields, `ApiResponse::message` and `FieldViolation::message` are
+  `Message` values now: a non-blank client-facing string built with
+  `Message::try_new` (or `TryFrom`); there is deliberately no infallible
+  `From`. An empty or whitespace-only message used to render as
+  `"message": ""` — a blank 404/500 body from an application catalog or a
+  DTO's `#[validate(message = "")]`.
+- `ApiResponse::error`/`error_with_errors` take a `http::StatusCode` and a
+  `Message`, so `ApiResponse::error(0, "")` is no longer expressible; the
+  body's `code` still carries the status as an `i32` and the response still
+  answers HTTP 200.
+- `ValidationErrors`' map is private — build it with `insert`. A blank field
+  key (a `garde` struct-level rule has no field path) is stored under `"_"`,
+  and the type can no longer hold `{"email": []}`.
 
 ### Added
 
 - `secrets::{Secret, Ttl, Digest}`, with `SecretError`/`TtlError`/
   `DigestError`, plus `SessionIdError` and `Argon2ParamsError` — the checked
   values the authentication surface consumes.
+- `message::{Message, MessageError}`, re-exported at the crate root, with the
+  catalog's field type `Message` also re-exported from `texts` (every catalog
+  field is one).
+
+### Fixed
+
+- `ApiError`'s constructors drop a blank explicit message, so
+  `ApiError::new(kind, "")` answers with the catalog text for `kind` instead of
+  rendering an empty `message`.
+- `ValidationErrors` rejects the entry shapes its public map used to allow —
+  a blank key or an empty violation list — on deserialization.
 
 ## 0.3.4 — 2026-09-14
 

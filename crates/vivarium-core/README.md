@@ -9,8 +9,9 @@ contract — the shared vocabulary between `vivarium-db` and `vivarium-web`.
 
 ## What's inside
 
-- [`Pagination`] — 1-based page requests; construction normalizes out-of-range
-  values (`page <= 1_000_000`, `per_page <= 100`, zero becomes 20)
+- [`Pagination`] — 1-based page requests; every constructor clamps
+  out-of-range values (`page <= 1_000_000`, `per_page <= 100`, zero becomes 20)
+  through the [`PageNumber`] / [`PageSize`] field types
 - [`Order`] / [`Column`] / [`Sorter`] — a compile-time sorting whitelist:
   column names can only come from your `Column` enum, never from a string
 - [`Page<T>`] — paged results (`items`, `total`, `page`, `per_page`)
@@ -34,7 +35,7 @@ contract — the shared vocabulary between `vivarium-db` and `vivarium-web`.
 use vivarium_core::Pagination;
 
 let p = Pagination::new(0, 0); // normalized: page 1, per_page 20
-assert_eq!((p.page, p.per_page), (1, 20));
+assert_eq!((p.page.get(), p.per_page.get()), (1, 20));
 assert_eq!(p.limit_offset(), (20, 0));
 ```
 
@@ -56,6 +57,8 @@ let sorter = Sorter::new(UserCol::Name, Order::Asc);
 MSRV: Rust 1.94.
 
 [`Pagination`]: https://docs.rs/vivarium-core/latest/vivarium_core/struct.Pagination.html
+[`PageNumber`]: https://docs.rs/vivarium-core/latest/vivarium_core/struct.PageNumber.html
+[`PageSize`]: https://docs.rs/vivarium-core/latest/vivarium_core/struct.PageSize.html
 [`Order`]: https://docs.rs/vivarium-core/latest/vivarium_core/enum.Order.html
 [`Column`]: https://docs.rs/vivarium-core/latest/vivarium_core/trait.Column.html
 [`Page<T>`]: https://docs.rs/vivarium-core/latest/vivarium_core/struct.Page.html

@@ -80,8 +80,8 @@ pub use query::{Query, RawFragment, RawFragmentError};
 pub use transaction::with_transaction;
 pub use update::{Expr, Update};
 pub use vivarium_core::{
-    Column, EncodeError, Entity, NullType, Order, Page, Pagination, PrimaryKey, PrimaryKeyError,
-    Sorter, Value,
+    Column, EncodeError, Entity, NullType, Order, Page, PageNumber, PageSize, Pagination,
+    PrimaryKey, PrimaryKeyError, Sorter, Value,
 };
 pub use vivarium_macros::Entity;
 

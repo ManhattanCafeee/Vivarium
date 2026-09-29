@@ -25,10 +25,12 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
+use crate::message::Message;
 use crate::validation::ValidationErrors;
 
-/// The `message` of every success body.
-const OK_MESSAGE: &str = "ok";
+/// The `message` of every success body: const-evaluated, so `Message::literal`'s
+/// blank check runs at compile time.
+const OK_MESSAGE: Message = Message::literal("ok");
 
 /// The unified response envelope.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -37,7 +39,8 @@ pub struct ApiResponse<T> {
     /// `0` on success, otherwise the HTTP status code of the failure.
     pub code: i32,
     /// A short human-readable message; `"ok"` on success.
-    pub message: String,
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+    pub message: Message,
     /// The validation violations; present only for a failed validation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<ValidationErrors>,
@@ -58,7 +61,7 @@ impl<T> ApiResponse<T> {
     pub fn ok(data: T) -> Self {
         Self {
             code: 0,
-            message: OK_MESSAGE.to_string(),
+            message: OK_MESSAGE,
             errors: None,
             data: Some(data),
         }
@@ -70,10 +73,13 @@ impl<T> ApiResponse<T> {
     /// still answers **HTTP 200**, because [`ApiResponse`] is the success
     /// path. Return an [`ApiError`](crate::ApiError) for a real error status,
     /// or pair this with `(StatusCode, ApiResponse<T>)`.
-    pub fn error(status: i32, message: impl Into<String>) -> Self {
+    ///
+    /// Both parameters are closed: a `http::StatusCode` cannot carry `0` or an
+    /// out-of-band number, and a [`Message`] cannot be blank.
+    pub fn error(status: StatusCode, message: Message) -> Self {
         Self {
-            code: status,
-            message: message.into(),
+            code: i32::from(status.as_u16()),
+            message,
             errors: None,
             data: None,
         }
@@ -85,13 +91,13 @@ impl<T> ApiResponse<T> {
     /// [`ApiError::validation`](crate::ApiError::validation) to actually
     /// answer 422.
     pub fn error_with_errors(
-        status: i32,
-        message: impl Into<String>,
+        status: StatusCode,
+        message: Message,
         errors: ValidationErrors,
     ) -> Self {
         Self {
-            code: status,
-            message: message.into(),
+            code: i32::from(status.as_u16()),
+            message,
             errors: Some(errors),
             data: None,
         }
@@ -110,7 +116,7 @@ impl<T: Serialize> IntoResponse for ApiResponse<T> {
             StatusCode::OK,
             Json(envelope(
                 code,
-                Cow::Owned(message),
+                Cow::Borrowed(message.as_str()),
                 errors.as_ref(),
                 None,
                 data,
@@ -170,6 +176,11 @@ mod tests {
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
 
+    /// A non-blank message for the envelope constructors.
+    fn msg(text: &'static str) -> Message {
+        Message::try_new(text).expect("non-empty literal")
+    }
+
     async fn body_json(response: Response) -> Value {
         let bytes = response
             .into_body()
@@ -195,7 +206,8 @@ mod tests {
     /// The error envelope always carries `data: null` and omits `errors`.
     #[tokio::test]
     async fn error_keeps_data_and_omits_errors() {
-        let response = ApiResponse::<()>::error(404, "not found").into_response();
+        let response =
+            ApiResponse::<()>::error(StatusCode::NOT_FOUND, msg("not found")).into_response();
         assert_eq!(response.status(), StatusCode::OK);
         let body = body_json(response).await;
         assert_eq!(
@@ -214,13 +226,17 @@ mod tests {
             "username",
             FieldViolation {
                 code: "length".to_string(),
-                message: Some("too short".to_string()),
+                message: Message::try_new("too short").ok(),
                 params: [("min".to_string(), json!(3))].into_iter().collect(),
             },
         );
 
-        let response =
-            ApiResponse::<()>::error_with_errors(422, "validation failed", errors).into_response();
+        let response = ApiResponse::<()>::error_with_errors(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            msg("validation failed"),
+            errors,
+        )
+        .into_response();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             body_json(response).await,
@@ -249,12 +265,17 @@ mod tests {
                 params: Default::default(),
             },
         );
-        let body = serde_json::to_value(ApiResponse::<()>::error_with_errors(422, "nope", errors))
-            .expect("serializes");
+        let body = serde_json::to_value(ApiResponse::<()>::error_with_errors(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            msg("nope"),
+            errors,
+        ))
+        .expect("serializes");
         assert_eq!(
             body["errors"]["email"][0],
             json!({ "code": "email", "params": {} })
         );
+        assert_eq!(body["message"], "nope");
     }
 
     /// The envelope's field order is part of the contract.
@@ -262,5 +283,15 @@ mod tests {
     fn envelope_field_order_is_stable() {
         let rendered = serde_json::to_string(&ApiResponse::ok(json!(1))).expect("serializes");
         assert_eq!(rendered, r#"{"code":0,"message":"ok","data":1}"#);
+
+        let rendered = serde_json::to_string(&ApiResponse::<()>::error(
+            StatusCode::NOT_FOUND,
+            msg("not found"),
+        ))
+        .expect("serializes");
+        assert_eq!(
+            rendered,
+            r#"{"code":404,"message":"not found","data":null}"#
+        );
     }
 }

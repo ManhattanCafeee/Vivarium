@@ -20,10 +20,10 @@ use vivarium_rs::jwt::{decode_token, jwt_auth, sign_token};
 // Core vocabulary and the db layer, including the doc-hidden driver glue that a
 // bound written against `vivarium-db` needs.
 use vivarium_rs::{
-    Column, DbError, DriverOps, EncodeError, Entity, Expr, NullType, Order, Page, Pagination,
-    Predicate, PrimaryKey, PrimaryKeyError, Query, RawFragment, RawFragmentError, Sorter, Step,
-    Update, Value, count, create, delete, exists, find_by_id, is_unique_violation, sqlx,
-    update_by_id, with_transaction,
+    Column, DbError, DriverOps, EncodeError, Entity, Expr, NullType, Order, Page, PageNumber,
+    PageSize, Pagination, Predicate, PrimaryKey, PrimaryKeyError, Query, RawFragment,
+    RawFragmentError, Sorter, Step, Update, Value, count, create, delete, exists, find_by_id,
+    is_unique_violation, sqlx, update_by_id, with_transaction,
 };
 
 // The web layer: the envelope, the extractors, the auth surface, and the
@@ -31,13 +31,13 @@ use vivarium_rs::{
 use vivarium_rs::{
     AccessClaims, ApiError, ApiResponse, Argon2Params, Argon2ParamsError, CacheControl, Claims,
     CookieOptions, Digest, DigestError, ErrorKind, FieldViolation, FormVarser, Initializer,
-    JwtConfig, JwtVerifier, KeyRing, OptionalSessionCtx, PathVarser, PermissionSet, QueryVarser,
-    RefreshTokenManager, RefreshTokenRecord, RefreshTokenStore, SameSite, Secret, SecretError,
-    SessionAuth, SessionCtx, SessionId, SessionIdError, SessionRecord, SessionStore, Texts,
-    TokenPair, Ttl, TtlError, ValidationErrors, Varser, VerifyOutcome, debug_mode,
-    get_authorization, hash, hash_token, hash_with, install_debug_mode, install_texts,
-    needs_rehash, perms_match, serve_with_shutdown, session_layer, should_extend, shutdown_signal,
-    verify, verify_and_upgrade, verify_login,
+    JwtConfig, JwtVerifier, KeyRing, Message, MessageError, OptionalSessionCtx, PathVarser,
+    PermissionSet, QueryVarser, RefreshTokenManager, RefreshTokenRecord, RefreshTokenStore,
+    SameSite, Secret, SecretError, SessionAuth, SessionCtx, SessionId, SessionIdError,
+    SessionRecord, SessionStore, Texts, TokenPair, Ttl, TtlError, ValidationErrors, Varser,
+    VerifyOutcome, debug_mode, get_authorization, hash, hash_token, hash_with, install_debug_mode,
+    install_texts, needs_rehash, perms_match, serve_with_shutdown, session_layer, should_extend,
+    shutdown_signal, verify, verify_and_upgrade, verify_login,
 };
 
 // The config layer.

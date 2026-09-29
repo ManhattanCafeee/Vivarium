@@ -303,7 +303,10 @@ async fn paginate_returns_total_and_page() {
         .paginate(Pagination::new(2, 10), &pool)
         .await
         .expect("paginate");
-    assert_eq!((page.total, page.page, page.per_page), (45, 2, 10));
+    assert_eq!(
+        (page.total, page.page.get(), page.per_page.get()),
+        (45, 2, 10)
+    );
     assert_eq!(page.pages(), 5);
     assert_eq!(page.items.len(), 10);
     assert_eq!(page.items[0].age, 11);
@@ -321,7 +324,7 @@ async fn paginate_normalizes_out_of_range_sizes() {
         .paginate(Pagination::new(0, 0), &pool)
         .await
         .expect("paginate");
-    assert_eq!((page.page, page.per_page), (1, 20));
+    assert_eq!((page.page.get(), page.per_page.get()), (1, 20));
     assert_eq!(page.items.len(), 20);
     assert_eq!(page.total, 45);
 
@@ -331,7 +334,7 @@ async fn paginate_normalizes_out_of_range_sizes() {
         .paginate(Pagination::new(1, 101), &pool)
         .await
         .expect("paginate");
-    assert_eq!((page.page, page.per_page), (1, 100));
+    assert_eq!((page.page.get(), page.per_page.get()), (1, 100));
     assert_eq!(page.items.len(), 45);
 
     // page beyond the data → empty items, correct total
@@ -373,7 +376,7 @@ async fn paginate_with_total_runs_no_count_query() {
         .await
         .expect("paginate");
     assert_eq!(page.total, 7);
-    assert_eq!((page.page, page.per_page), (1, 2));
+    assert_eq!((page.page.get(), page.per_page.get()), (1, 2));
     assert_eq!(page.items.len(), 2);
     assert_eq!(page.items[0].age, 1);
     assert_eq!(page.items[1].age, 2);

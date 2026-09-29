@@ -27,7 +27,9 @@
 //! process) unless the call site supplied its own — a handler's
 //! `ApiError::not_found("no such user")` reaches the client verbatim — while a
 //! violation's own `message` is whatever the DTO declared in its
-//! `#[validate(message = "…")]` attribute. The submitted field value is
+//! `#[validate(message = "…")]` attribute. Every one of those is a non-blank
+//! [`Message`], so an empty `message` cannot be rendered; a blank explicit
+//! message falls back to the catalog text. The submitted field value is
 //! never echoed back in `params`.
 //!
 //! ## Extractors
@@ -62,6 +64,7 @@ pub mod authz;
 pub mod cache;
 pub mod error;
 pub mod jwt;
+pub mod message;
 pub mod password;
 pub mod response;
 pub mod secrets;
@@ -79,6 +82,7 @@ pub use authz::{PermissionSet, perms_match};
 pub use cache::CacheControl;
 pub use error::{ApiError, ErrorKind, Result, debug_mode, install_debug_mode};
 pub use jwt::{JwtConfig, JwtVerifier, KeyRing};
+pub use message::{Message, MessageError};
 pub use password::{
     Argon2Params, Argon2ParamsError, VerifyOutcome, hash, hash_with, needs_rehash, verify,
     verify_and_upgrade, verify_login,

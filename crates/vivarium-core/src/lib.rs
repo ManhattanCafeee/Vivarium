@@ -27,11 +27,124 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// A 1-based page number.
+///
+/// Every constructor clamps: `0` becomes `1`, anything above
+/// [`PageNumber::MAX`] clamps down — the rule [`Pagination::new`] has always
+/// applied — so no instance can hold an out-of-range page. Built with
+/// [`PageNumber::new`], `From<u32>` (`page.into()`), or deserialization
+/// (`#[serde(from = "u32")]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "utoipa", schema(value_type = u32))]
+#[serde(from = "u32")]
+pub struct PageNumber(u32);
+
+impl PageNumber {
+    /// The largest accepted page number (`1_000_000`).
+    pub const MAX: u32 = 1_000_000;
+
+    /// Clamps `page` into `1..=MAX`.
+    pub const fn new(page: u32) -> Self {
+        if page == 0 {
+            Self(1)
+        } else if page > Self::MAX {
+            Self(Self::MAX)
+        } else {
+            Self(page)
+        }
+    }
+
+    /// The page number as a `u32`.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for PageNumber {
+    /// Clamps `page` into `1..=PageNumber::MAX`: an out-of-range value is
+    /// normalized, never rejected.
+    fn from(page: u32) -> Self {
+        Self::new(page)
+    }
+}
+
+impl From<PageNumber> for u32 {
+    fn from(page: PageNumber) -> Self {
+        page.get()
+    }
+}
+
+impl fmt::Display for PageNumber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A page size in rows.
+///
+/// Every constructor clamps: `0` becomes [`PageSize::DEFAULT`], anything above
+/// [`PageSize::MAX`] clamps down — the rule [`Pagination::new`] has always
+/// applied — so no instance can hold a zero or out-of-range size. Built with
+/// [`PageSize::new`], `From<u32>` (`size.into()`), or deserialization
+/// (`#[serde(from = "u32")]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "utoipa", schema(value_type = u32))]
+#[serde(from = "u32")]
+pub struct PageSize(u32);
+
+impl PageSize {
+    /// The largest accepted page size (`100`).
+    pub const MAX: u32 = 100;
+    /// The page size a zero request becomes (`20`).
+    pub const DEFAULT: u32 = 20;
+
+    /// Clamps `per_page` into `1..=MAX`, mapping `0` to [`PageSize::DEFAULT`].
+    pub const fn new(per_page: u32) -> Self {
+        if per_page == 0 {
+            Self(Self::DEFAULT)
+        } else if per_page > Self::MAX {
+            Self(Self::MAX)
+        } else {
+            Self(per_page)
+        }
+    }
+
+    /// The page size as a `u32`.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for PageSize {
+    /// Clamps `per_page` into `1..=PageSize::MAX` (zero becomes
+    /// [`PageSize::DEFAULT`]): an out-of-range value is normalized, never
+    /// rejected.
+    fn from(per_page: u32) -> Self {
+        Self::new(per_page)
+    }
+}
+
+impl From<PageSize> for u32 {
+    fn from(per_page: PageSize) -> Self {
+        per_page.get()
+    }
+}
+
+impl fmt::Display for PageSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A page request: 1-based page number plus page size.
 ///
-/// Construction normalizes out-of-range values (see [`normalize`]).
-///
-/// [`normalize`]: Pagination::normalize
+/// Every path normalizes: [`Pagination::new`], `From<u32>` on the two field
+/// types (`0.into()`), and deserialization (which goes through
+/// [`Pagination::new`]) all clamp, and [`PageNumber`]/[`PageSize`] make a zero
+/// or out-of-range value unrepresentable — so any `Pagination` value is already
+/// normalized, whichever path built it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(from = "PaginationArgs")]
@@ -40,59 +153,36 @@ pub struct Pagination {
     ///
     /// Advertised to OpenAPI as an optional parameter defaulting to `1`,
     /// matching the hand-written `IntoParams` impl.
-    #[cfg_attr(feature = "utoipa", schema(default = 1, required = false))]
-    pub page: u32,
+    #[cfg_attr(feature = "utoipa", schema(value_type = u32, default = 1, required = false))]
+    pub page: PageNumber,
     /// Number of rows per page, normalized to `1..=MAX_PER_PAGE`.
     ///
     /// Advertised to OpenAPI as an optional parameter defaulting to
     /// [`DEFAULT_PER_PAGE`], matching the hand-written `IntoParams` impl.
     ///
     /// [`DEFAULT_PER_PAGE`]: Pagination::DEFAULT_PER_PAGE
-    #[cfg_attr(feature = "utoipa", schema(default = 20, required = false))]
-    pub per_page: u32,
+    #[cfg_attr(feature = "utoipa", schema(value_type = u32, default = 20, required = false))]
+    pub per_page: PageSize,
 }
 
 impl Pagination {
     /// Maximum accepted page number.
-    pub const MAX_PAGE: u32 = 1_000_000;
+    pub const MAX_PAGE: u32 = PageNumber::MAX;
     /// Maximum accepted page size.
-    pub const MAX_PER_PAGE: u32 = 100;
+    pub const MAX_PER_PAGE: u32 = PageSize::MAX;
     /// Page size used when a non-positive size is requested.
-    pub const DEFAULT_PER_PAGE: u32 = 20;
+    pub const DEFAULT_PER_PAGE: u32 = PageSize::DEFAULT;
 
-    /// Constructs a pagination, normalizing out-of-range values in place.
+    /// Constructs a pagination, normalizing out-of-range values.
     ///
     /// `page` is clamped to `1..=MAX_PAGE`; `per_page` to
     /// `1..=MAX_PER_PAGE`, with `0` mapped to [`DEFAULT_PER_PAGE`].
     ///
     /// [`DEFAULT_PER_PAGE`]: Pagination::DEFAULT_PER_PAGE
     pub fn new(page: u32, per_page: u32) -> Self {
-        let mut pagination = Self { page, per_page };
-        pagination.normalize();
-        pagination
-    }
-
-    /// Normalizes `page` and `per_page` in place.
-    ///
-    /// - `page == 0` becomes `1`; values above [`MAX_PAGE`] clamp down.
-    /// - `per_page == 0` becomes [`DEFAULT_PER_PAGE`]; values above
-    ///   [`MAX_PER_PAGE`] clamp down.
-    ///
-    /// [`MAX_PAGE`]: Pagination::MAX_PAGE
-    /// [`MAX_PER_PAGE`]: Pagination::MAX_PER_PAGE
-    /// [`DEFAULT_PER_PAGE`]: Pagination::DEFAULT_PER_PAGE
-    pub fn normalize(&mut self) {
-        if self.page == 0 {
-            self.page = 1;
-        }
-        if self.page > Self::MAX_PAGE {
-            self.page = Self::MAX_PAGE;
-        }
-        if self.per_page == 0 {
-            self.per_page = Self::DEFAULT_PER_PAGE;
-        }
-        if self.per_page > Self::MAX_PER_PAGE {
-            self.per_page = Self::MAX_PER_PAGE;
+        Self {
+            page: page.into(),
+            per_page: per_page.into(),
         }
     }
 
@@ -100,24 +190,13 @@ impl Pagination {
     ///
     /// `LIMIT` is `per_page`; `OFFSET` is `(page - 1) * per_page`.
     ///
-    /// The arithmetic is also defined for values that bypassed [`normalize`]
-    /// through a struct literal: `page == 0` is read as the first page and
-    /// `per_page == 0` as [`DEFAULT_PER_PAGE`]. The offset is computed in
-    /// `u64` and saturates, so no input can overflow or underflow.
+    /// Both values are at least `1` by construction and `page` is bounded by
+    /// [`MAX_PAGE`], so the `u64` offset can neither underflow nor overflow.
     ///
-    /// [`normalize`]: Pagination::normalize
-    /// [`DEFAULT_PER_PAGE`]: Pagination::DEFAULT_PER_PAGE
+    /// [`MAX_PAGE`]: Pagination::MAX_PAGE
     pub fn limit_offset(&self) -> (u64, u64) {
-        let page = self.page.max(1);
-        let per_page = if self.per_page == 0 {
-            Self::DEFAULT_PER_PAGE
-        } else {
-            self.per_page
-        };
-        (
-            u64::from(per_page),
-            u64::from(page - 1).saturating_mul(u64::from(per_page)),
-        )
+        let per_page = u64::from(self.per_page.get());
+        (per_page, u64::from(self.page.get() - 1) * per_page)
     }
 }
 
@@ -132,13 +211,10 @@ impl Default for Pagination {
 
 /// The deserialization shape of [`Pagination`].
 ///
-/// Deserialization goes through [`Pagination::new`], so every value built by
-/// `new`, [`Default`], or deserialization satisfies the normalization
-/// invariant — a wire value such as `{"page": 0}` would otherwise reach
-/// [`Pagination::limit_offset`] with `page == 0`. A struct literal can bypass
-/// that invariant, which is why `limit_offset` also handles unnormalized
-/// values. Missing fields take the documented defaults, matching the
-/// `IntoParams` schema.
+/// Deserialization goes through [`Pagination::new`], so the wire path clamps
+/// exactly like the constructors do — a value such as `{"page": 0}` becomes the
+/// first page and never reaches [`Pagination::limit_offset`] as `0`. Missing
+/// fields take the documented defaults, matching the `IntoParams` schema.
 #[derive(Deserialize)]
 #[serde(default)]
 struct PaginationArgs {
@@ -278,22 +354,20 @@ pub struct Page<T> {
     /// Total number of matching rows across all pages.
     pub total: u64,
     /// The (normalized) page number this page represents.
-    pub page: u32,
+    #[cfg_attr(feature = "utoipa", schema(value_type = u32, minimum = 1))]
+    pub page: PageNumber,
     /// The (normalized) page size.
-    pub per_page: u32,
+    #[cfg_attr(feature = "utoipa", schema(value_type = u32, minimum = 1))]
+    pub per_page: PageSize,
 }
 
 impl<T> Page<T> {
     /// Total number of pages, rounding up.
     ///
-    /// Returns `0` when `per_page` is `0` (only possible through manual
-    /// construction).
+    /// A zero-sized page is unrepresentable ([`PageSize`] is at least `1`), so
+    /// this cannot divide by zero.
     pub fn pages(&self) -> u64 {
-        if self.per_page == 0 {
-            0
-        } else {
-            self.total.div_ceil(u64::from(self.per_page))
-        }
+        self.total.div_ceil(u64::from(self.per_page.get()))
     }
 }
 
@@ -786,16 +860,16 @@ mod tests {
 
     #[test]
     fn pagination_normalizes_page() {
-        assert_eq!(Pagination::new(0, 20).page, 1);
-        assert_eq!(Pagination::new(1, 20).page, 1);
-        assert_eq!(Pagination::new(1_000_001, 20).page, 1_000_000);
+        assert_eq!(Pagination::new(0, 20).page.get(), 1);
+        assert_eq!(Pagination::new(1, 20).page.get(), 1);
+        assert_eq!(Pagination::new(1_000_001, 20).page.get(), 1_000_000);
     }
 
     #[test]
     fn pagination_normalizes_per_page() {
-        assert_eq!(Pagination::new(1, 0).per_page, 20);
-        assert_eq!(Pagination::new(1, 20).per_page, 20);
-        assert_eq!(Pagination::new(1, 101).per_page, 100);
+        assert_eq!(Pagination::new(1, 0).per_page.get(), 20);
+        assert_eq!(Pagination::new(1, 20).per_page.get(), 20);
+        assert_eq!(Pagination::new(1, 101).per_page.get(), 100);
     }
 
     #[test]
@@ -809,45 +883,34 @@ mod tests {
     }
 
     #[test]
-    fn pagination_limit_offset_handles_unnormalized_values() {
-        // The fields are public, so a struct literal can bypass the
-        // normalization `new`/`Deserialize` perform. `page == 0` must not
-        // underflow and `per_page == 0` must not yield a `LIMIT` of 0.
-        assert_eq!(
-            Pagination {
-                page: 0,
-                per_page: 0
-            }
-            .limit_offset(),
-            (20, 0)
-        );
-        assert_eq!(
-            Pagination {
-                page: 0,
-                per_page: 20
-            }
-            .limit_offset(),
-            (20, 0)
-        );
+    fn pagination_field_literals_normalize() {
+        // The fields are public, but `PageNumber`/`PageSize` clamp on every
+        // construction path, so a struct literal cannot build an unnormalized
+        // pagination either.
+        let zeroed = Pagination {
+            page: 0.into(),
+            per_page: 0.into(),
+        };
+        assert_eq!((zeroed.page.get(), zeroed.per_page.get()), (1, 20));
+        assert_eq!(zeroed.limit_offset(), (20, 0));
     }
 
     #[test]
-    fn pagination_limit_offset_does_not_overflow() {
-        let extreme_page = Pagination {
-            page: u32::MAX,
-            per_page: 20,
-        };
+    fn pagination_extremes_clamp() {
+        let extreme = Pagination::new(u32::MAX, u32::MAX);
         assert_eq!(
-            extreme_page.limit_offset(),
-            (20, (u32::MAX - 1) as u64 * 20)
+            (extreme.page.get(), extreme.per_page.get()),
+            (Pagination::MAX_PAGE, Pagination::MAX_PER_PAGE)
         );
+        assert_eq!(extreme.limit_offset(), (100, 99_999_900));
+    }
 
-        let extreme_everything = Pagination {
-            page: u32::MAX,
-            per_page: u32::MAX,
-        };
-        let offset = (u32::MAX - 1) as u64 * u32::MAX as u64;
-        assert_eq!(extreme_everything.limit_offset(), (u32::MAX as u64, offset));
+    #[test]
+    fn page_number_and_size_clamp_to_their_ranges() {
+        assert_eq!(PageNumber::new(0).get(), 1);
+        assert_eq!(PageNumber::new(u32::MAX).get(), PageNumber::MAX);
+        assert_eq!(PageSize::new(0).get(), PageSize::DEFAULT);
+        assert_eq!(PageSize::new(101).get(), PageSize::MAX);
     }
 
     #[test]
@@ -855,34 +918,26 @@ mod tests {
         let page: Page<()> = Page {
             items: vec![],
             total: 45,
-            page: 1,
-            per_page: 10,
+            page: 1.into(),
+            per_page: 10.into(),
         };
         assert_eq!(page.pages(), 5);
 
         let exact: Page<()> = Page {
             items: vec![],
             total: 40,
-            page: 1,
-            per_page: 10,
+            page: 1.into(),
+            per_page: 10.into(),
         };
         assert_eq!(exact.pages(), 4);
 
         let empty: Page<()> = Page {
             items: vec![],
             total: 0,
-            page: 1,
-            per_page: 10,
+            page: 1.into(),
+            per_page: 10.into(),
         };
         assert_eq!(empty.pages(), 0);
-
-        let zero_sized: Page<()> = Page {
-            items: vec![],
-            total: 10,
-            page: 1,
-            per_page: 0,
-        };
-        assert_eq!(zero_sized.pages(), 0);
     }
 
     #[test]
@@ -890,8 +945,8 @@ mod tests {
         let page = Page {
             items: vec![1_u32, 2],
             total: 2,
-            page: 1,
-            per_page: 10,
+            page: 1.into(),
+            per_page: 10.into(),
         };
         assert_eq!(
             serde_json::to_value(&page).expect("page serializes"),
@@ -910,15 +965,27 @@ mod tests {
     }
 
     #[test]
+    fn page_deserialization_clamps() {
+        let page: Page<u32> = serde_json::from_value(
+            serde_json::json!({ "items": [], "total": 0, "page": 0, "per_page": 0 }),
+        )
+        .expect("page deserializes");
+        assert_eq!((page.page.get(), page.per_page.get()), (1, 20));
+    }
+
+    #[test]
     fn pagination_deserialization_normalizes_and_defaults() {
         let defaulted: Pagination =
             serde_json::from_value(serde_json::json!({})).expect("empty object defaults");
-        assert_eq!((defaulted.page, defaulted.per_page), (1, 20));
+        assert_eq!((defaulted.page.get(), defaulted.per_page.get()), (1, 20));
 
         let out_of_range: Pagination =
             serde_json::from_value(serde_json::json!({ "page": 0, "per_page": 0 }))
                 .expect("zeros are normalized");
-        assert_eq!((out_of_range.page, out_of_range.per_page), (1, 20));
+        assert_eq!(
+            (out_of_range.page.get(), out_of_range.per_page.get()),
+            (1, 20)
+        );
         // The normalization invariant is what keeps this arithmetic safe.
         assert_eq!(out_of_range.limit_offset(), (20, 0));
     }
@@ -926,7 +993,7 @@ mod tests {
     #[test]
     fn default_pagination_is_first_page() {
         let p = Pagination::default();
-        assert_eq!((p.page, p.per_page), (1, 20));
+        assert_eq!((p.page.get(), p.per_page.get()), (1, 20));
     }
 
     #[test]

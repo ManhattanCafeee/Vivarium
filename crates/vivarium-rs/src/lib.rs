@@ -87,8 +87,8 @@
 #![deny(missing_docs)]
 
 pub use vivarium_core::{
-    Column, EncodeError, Entity, NullType, Order, Page, Pagination, PrimaryKey, PrimaryKeyError,
-    Sorter, Value,
+    Column, EncodeError, Entity, NullType, Order, Page, PageNumber, PageSize, Pagination,
+    PrimaryKey, PrimaryKeyError, Sorter, Value,
 };
 
 #[cfg(feature = "db")]
@@ -113,14 +113,14 @@ pub use vivarium_macros::Entity;
 pub use vivarium_web::{
     AccessClaims, ApiError, ApiResponse, Argon2Params, Argon2ParamsError, CacheControl, Claims,
     CookieOptions, Digest, DigestError, ErrorKind, FieldViolation, FormVarser, Initializer,
-    JwtConfig, JwtVerifier, KeyRing, OptionalSessionCtx, PathVarser, PermissionSet, QueryVarser,
-    RefreshTokenManager, RefreshTokenRecord, RefreshTokenStore, Result, SameSite, Secret,
-    SecretError, SessionAuth, SessionCtx, SessionId, SessionIdError, SessionRecord, SessionStore,
-    Texts, TokenPair, Ttl, TtlError, ValidationErrors, Varser, VerifyOutcome, authz, cache,
-    debug_mode, error, get_authorization, hash, hash_token, hash_with, install_debug_mode,
-    install_texts, jwt, needs_rehash, password, perms_match, response, secrets, serve,
-    serve_with_shutdown, session, session_layer, should_extend, shutdown_signal, texts, token,
-    validation, varser, verify, verify_and_upgrade, verify_login,
+    JwtConfig, JwtVerifier, KeyRing, Message, MessageError, OptionalSessionCtx, PathVarser,
+    PermissionSet, QueryVarser, RefreshTokenManager, RefreshTokenRecord, RefreshTokenStore, Result,
+    SameSite, Secret, SecretError, SessionAuth, SessionCtx, SessionId, SessionIdError,
+    SessionRecord, SessionStore, Texts, TokenPair, Ttl, TtlError, ValidationErrors, Varser,
+    VerifyOutcome, authz, cache, debug_mode, error, get_authorization, hash, hash_token, hash_with,
+    install_debug_mode, install_texts, jwt, needs_rehash, password, perms_match, response, secrets,
+    serve, serve_with_shutdown, session, session_layer, should_extend, shutdown_signal, texts,
+    token, validation, varser, verify, verify_and_upgrade, verify_login,
 };
 
 #[cfg(all(feature = "web", feature = "validation-garde"))]

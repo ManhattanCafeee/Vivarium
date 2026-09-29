@@ -162,8 +162,8 @@ async fn first_page(pool: &vivarium_rs::sqlx::sqlite::SqlitePool) -> sqlx::Resul
     let page = Query::<_, User>::new()
         .paginate(Pagination::new(2, 20), pool)
         .await?;
-    // page.items, page.total, page.page, page.per_page, page.pages()
-    // out-of-range page/per_page values are normalized
+    // page.items, page.total, page.page.get(), page.per_page.get(), page.pages()
+    // out-of-range page/per_page values are clamped by the field types
     let _ = (page.total, page.pages());
     Ok(())
 }
@@ -321,7 +321,7 @@ The envelope `message` comes from the library's catalog — or straight from the
 call site when a handler supplies its own, as in `ApiError::not_found("no such
 user")`. The catalog is English until the application installs its own once at
 startup —
-`install_texts(Texts { unauthorized: "缺少会话 Cookie".into(), ..Texts::default() })`
+`install_texts(Texts { unauthorized: Message::try_new("缺少会话 Cookie")?, ..Texts::default() })`
 — and `echo_details` additionally lets a `4xx` message repeat the parser's
 detail (useful when a custom `Deserialize` error must reach the client). A
 violation's own `message` is whatever the DTO declared in its
