@@ -24,7 +24,7 @@ messages) are English; applications localize them through `install_texts`.
 
 ```toml
 [dependencies]
-vivarium-rs = "0.3"       # default features: web, config, db, db-sqlite, db-postgres
+vivarium-rs = "0.4"       # default features: web, config, db, db-sqlite, db-postgres
 anyhow = "1"              # only for `main`'s error type in the example below
 axum = "0.8"
 sqlx = { version = "0.9", features = ["sqlite", "migrate"] }
