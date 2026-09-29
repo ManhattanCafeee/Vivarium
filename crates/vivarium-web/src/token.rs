@@ -28,6 +28,7 @@
 //! use chrono::{DateTime, Utc};
 //! use parking_lot::Mutex;
 //! use std::{collections::HashMap, sync::Arc, time::Duration};
+//! use vivarium_web::secrets::{Digest, Secret, Ttl};
 //! use vivarium_web::{AccessClaims, Claims, RefreshTokenManager, RefreshTokenRecord, RefreshTokenStore};
 //!
 //! #[derive(Clone, Default)]
@@ -36,17 +37,17 @@
 //! impl RefreshTokenStore for TokenStore {
 //!     type UserId = u64;
 //!
-//!     async fn insert(&self, token_hash: &str, user: u64, expires_at: DateTime<Utc>)
+//!     async fn insert(&self, token_hash: &Digest, user: u64, expires_at: DateTime<Utc>)
 //!         -> Result<(), vivarium_web::ApiError> {
-//!         self.0.lock().insert(token_hash.to_string(), RefreshTokenRecord { user_id: user, expires_at });
+//!         self.0.lock().insert(token_hash.as_str().to_string(), RefreshTokenRecord { user_id: user, expires_at });
 //!         Ok(())
 //!     }
-//!     async fn lookup(&self, token_hash: &str)
+//!     async fn lookup(&self, token_hash: &Digest)
 //!         -> Result<Option<RefreshTokenRecord<u64>>, vivarium_web::ApiError> {
-//!         Ok(self.0.lock().get(token_hash).cloned())
+//!         Ok(self.0.lock().get(token_hash.as_str()).cloned())
 //!     }
-//!     async fn remove(&self, token_hash: &str) -> Result<bool, vivarium_web::ApiError> {
-//!         Ok(self.0.lock().remove(token_hash).is_some())
+//!     async fn remove(&self, token_hash: &Digest) -> Result<bool, vivarium_web::ApiError> {
+//!         Ok(self.0.lock().remove(token_hash.as_str()).is_some())
 //!     }
 //!     async fn remove_by_user(&self, user: u64) -> Result<u64, vivarium_web::ApiError> {
 //!         let mut store = self.0.lock();
@@ -59,8 +60,10 @@
 //! # async fn example() -> Result<(), vivarium_web::ApiError> {
 //! # use vivarium_web::Claims;
 //! let manager = RefreshTokenManager::new(
-//!     TokenStore::default(), "secret",
-//!     Duration::from_secs(900), Duration::from_secs(30 * 24 * 3600),
+//!     TokenStore::default(),
+//!     Secret::try_new("secret").expect("non-empty"),
+//!     Ttl::try_new(Duration::from_secs(900)).expect("non-zero TTL"),
+//!     Ttl::try_new(Duration::from_secs(30 * 24 * 3600)).expect("non-zero TTL"),
 //! );
 //!
 //! let mut claims = Claims {
@@ -93,7 +96,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::jwt;
-use crate::secrets::{generate_token, hash_token};
+use crate::secrets::{Digest, Secret, Ttl, generate_token};
 use crate::texts::texts;
 
 /// A stored refresh token.
@@ -108,7 +111,7 @@ pub struct RefreshTokenRecord<U = i64> {
 /// Storage back-end for refresh tokens.
 ///
 /// Implement against your own schema (see the module docs). Every `token_hash`
-/// this trait receives is a SHA-256 digest, never the value the client holds —
+/// this trait receives is a [`Digest`], never the value the client holds —
 /// store and compare it as-is. `remove` returns `true` only when exactly one
 /// row was deleted: that count is the single-use guarantee of rotation, so it
 /// must come from the database (`rows_affected`), not from a prior read.
@@ -119,7 +122,7 @@ pub trait RefreshTokenStore: Send + Sync + 'static {
     /// Persists a new token digest.
     fn insert(
         &self,
-        token_hash: &str,
+        token_hash: &Digest,
         user: Self::UserId,
         expires_at: DateTime<Utc>,
     ) -> impl Future<Output = Result<(), ApiError>> + Send;
@@ -127,11 +130,11 @@ pub trait RefreshTokenStore: Send + Sync + 'static {
     /// Returns the stored record for this digest, if it exists.
     fn lookup(
         &self,
-        token_hash: &str,
+        token_hash: &Digest,
     ) -> impl Future<Output = Result<Option<RefreshTokenRecord<Self::UserId>>, ApiError>> + Send;
 
     /// Deletes exactly one token row; returns whether one was deleted.
-    fn remove(&self, token_hash: &str) -> impl Future<Output = Result<bool, ApiError>> + Send;
+    fn remove(&self, token_hash: &Digest) -> impl Future<Output = Result<bool, ApiError>> + Send;
 
     /// Deletes every token of a user (logout / password change), returning how
     /// many were deleted.
@@ -229,9 +232,9 @@ impl<U: Clone> AccessClaims<U> for Claims<U> {
 #[derive(Clone)]
 pub struct RefreshTokenManager<S> {
     store: S,
-    secret: String,
-    access_ttl: Duration,
-    refresh_ttl: Duration,
+    secret: Secret,
+    access_ttl: Ttl,
+    refresh_ttl: Ttl,
 }
 
 impl<S: std::fmt::Debug> std::fmt::Debug for RefreshTokenManager<S> {
@@ -250,15 +253,10 @@ impl<S: RefreshTokenStore> RefreshTokenManager<S> {
     ///
     /// `access_ttl` is stamped onto every access token this manager signs;
     /// `refresh_ttl` bounds the life of a refresh token.
-    pub fn new(
-        store: S,
-        secret: impl Into<String>,
-        access_ttl: Duration,
-        refresh_ttl: Duration,
-    ) -> Self {
+    pub fn new(store: S, secret: Secret, access_ttl: Ttl, refresh_ttl: Ttl) -> Self {
         Self {
             store,
-            secret: secret.into(),
+            secret,
             access_ttl,
             refresh_ttl,
         }
@@ -271,12 +269,12 @@ impl<S: RefreshTokenStore> RefreshTokenManager<S> {
 
     /// The access-token TTL the manager stamps onto every token.
     pub fn access_ttl(&self) -> Duration {
-        self.access_ttl
+        self.access_ttl.get()
     }
 
     /// The refresh-token TTL.
     pub fn refresh_ttl(&self) -> Duration {
-        self.refresh_ttl
+        self.refresh_ttl.get()
     }
 
     /// Issues a fresh pair: an access token carrying `claims` and a new
@@ -310,7 +308,7 @@ impl<S: RefreshTokenStore> RefreshTokenManager<S> {
         F: FnOnce(S::UserId) -> Fut,
         Fut: Future<Output = Result<C, ApiError>>,
     {
-        let digest = hash_token(received);
+        let digest = Digest::of_token(received);
         let stored = self
             .store
             .lookup(&digest)
@@ -344,23 +342,24 @@ impl<S: RefreshTokenStore> RefreshTokenManager<S> {
         let now = jsonwebtoken::get_current_timestamp() as i64;
         claims.set_subject(user);
         claims.set_issued_at(now);
-        claims
-            .set_expiry(now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64));
+        claims.set_expiry(
+            now.saturating_add(self.access_ttl.get().as_secs().min(i64::MAX as u64) as i64),
+        );
         let access_token = jwt::sign_token(claims, &self.secret)?;
 
         let refresh_token = generate_token();
         self.store
             .insert(
-                &hash_token(&refresh_token),
+                &Digest::of_token(&refresh_token),
                 user,
-                expiry_after(self.refresh_ttl),
+                expiry_after(self.refresh_ttl.get()),
             )
             .await?;
 
         Ok(TokenPair {
             access_token,
             refresh_token,
-            expires_in: self.access_ttl.as_secs(),
+            expires_in: self.access_ttl.get().as_secs(),
         })
     }
 }
@@ -406,12 +405,21 @@ fn expiry_after(ttl: Duration) -> DateTime<Utc> {
 mod tests {
     use super::*;
     use crate::jwt::decode_token;
+    use crate::secrets::hash_token;
     use parking_lot::Mutex;
     use std::sync::Arc;
 
     const SECRET: &str = "test-secret";
     const ACCESS_TTL: Duration = Duration::from_secs(900);
     const REFRESH_TTL: Duration = Duration::from_secs(86_400);
+
+    fn secret(raw: &str) -> Secret {
+        Secret::try_new(raw).expect("non-empty test secret")
+    }
+
+    fn ttl(duration: Duration) -> Ttl {
+        Ttl::try_new(duration).expect("non-zero test ttl")
+    }
 
     type Store = Arc<Mutex<std::collections::HashMap<String, RefreshTokenRecord<u64>>>>;
 
@@ -437,12 +445,12 @@ mod tests {
 
         async fn insert(
             &self,
-            token_hash: &str,
+            token_hash: &Digest,
             user: u64,
             expires_at: DateTime<Utc>,
         ) -> Result<(), ApiError> {
             self.insert_record(
-                token_hash,
+                token_hash.as_str(),
                 RefreshTokenRecord {
                     user_id: user,
                     expires_at,
@@ -453,13 +461,13 @@ mod tests {
 
         async fn lookup(
             &self,
-            token_hash: &str,
+            token_hash: &Digest,
         ) -> Result<Option<RefreshTokenRecord<u64>>, ApiError> {
-            Ok(self.0.lock().get(token_hash).cloned())
+            Ok(self.0.lock().get(token_hash.as_str()).cloned())
         }
 
-        async fn remove(&self, token_hash: &str) -> Result<bool, ApiError> {
-            Ok(self.0.lock().remove(token_hash).is_some())
+        async fn remove(&self, token_hash: &Digest) -> Result<bool, ApiError> {
+            Ok(self.0.lock().remove(token_hash.as_str()).is_some())
         }
 
         async fn remove_by_user(&self, user: u64) -> Result<u64, ApiError> {
@@ -471,7 +479,7 @@ mod tests {
     }
 
     fn manager(store: InMemoryTokenStore) -> RefreshTokenManager<InMemoryTokenStore> {
-        RefreshTokenManager::new(store, SECRET, ACCESS_TTL, REFRESH_TTL)
+        RefreshTokenManager::new(store, secret(SECRET), ttl(ACCESS_TTL), ttl(REFRESH_TTL))
     }
 
     fn claims(sub: u64) -> Claims<u64> {
@@ -501,7 +509,8 @@ mod tests {
         assert_eq!(stale.subject(), 7, "the claims are stamped in place");
         assert_eq!(pair.expires_in, ACCESS_TTL.as_secs());
 
-        let decoded: Claims<u64> = decode_token(&pair.access_token, SECRET).expect("decodes");
+        let decoded: Claims<u64> =
+            decode_token(&pair.access_token, &secret(SECRET)).expect("decodes");
         assert_eq!(decoded.sub, 7);
         assert!(
             (before..=after).contains(&decoded.iat),
@@ -543,7 +552,8 @@ mod tests {
             .expect("rotate");
 
         assert_eq!(seen_user, Some(7), "the callback sees the stored user");
-        let decoded: Claims<u64> = decode_token(&rotated.access_token, SECRET).expect("decodes");
+        let decoded: Claims<u64> =
+            decode_token(&rotated.access_token, &secret(SECRET)).expect("decodes");
         assert_eq!(decoded.sub, 7, "the stored user wins over the callback");
         assert_ne!(rotated.refresh_token, pair.refresh_token);
         assert!(!store.contains(&hash_token(&pair.refresh_token)));
@@ -628,7 +638,7 @@ mod tests {
 
             async fn insert(
                 &self,
-                token_hash: &str,
+                token_hash: &Digest,
                 user: u64,
                 expires_at: DateTime<Utc>,
             ) -> Result<(), ApiError> {
@@ -637,12 +647,12 @@ mod tests {
 
             async fn lookup(
                 &self,
-                token_hash: &str,
+                token_hash: &Digest,
             ) -> Result<Option<RefreshTokenRecord<u64>>, ApiError> {
                 self.0.lookup(token_hash).await
             }
 
-            async fn remove(&self, _token_hash: &str) -> Result<bool, ApiError> {
+            async fn remove(&self, _token_hash: &Digest) -> Result<bool, ApiError> {
                 Ok(false)
             }
 
@@ -661,9 +671,9 @@ mod tests {
         );
         let manager = RefreshTokenManager::new(
             LostRaceStore(store.clone()),
-            SECRET,
-            ACCESS_TTL,
-            REFRESH_TTL,
+            secret(SECRET),
+            ttl(ACCESS_TTL),
+            ttl(REFRESH_TTL),
         );
 
         let error = manager
@@ -700,7 +710,8 @@ mod tests {
 
         // One value per claim: a duplicate would make the token undecodable
         // (or, for a last-wins parser, hand the caller someone else's subject).
-        let decoded: Claims<u64> = decode_token(&pair.access_token, SECRET).expect("decodes");
+        let decoded: Claims<u64> =
+            decode_token(&pair.access_token, &secret(SECRET)).expect("decodes");
         assert_eq!(decoded.sub, 7);
         assert_eq!(decoded.exp, decoded.iat + ACCESS_TTL.as_secs() as i64);
         assert_eq!(decoded.extra.get("role"), Some(&serde_json::json!("admin")));

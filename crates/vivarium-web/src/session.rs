@@ -30,6 +30,7 @@
 //! use chrono::{DateTime, Utc};
 //! use parking_lot::Mutex;
 //! use std::{collections::HashMap, sync::Arc, time::Duration};
+//! use vivarium_web::secrets::{Digest, Ttl};
 //! use vivarium_web::session::{
 //!     CookieOptions, SessionAuth, SessionCtx, SessionRecord, SessionStore, session_layer,
 //! };
@@ -40,26 +41,26 @@
 //! impl SessionStore for MyStore {
 //!     type UserId = u64;
 //!
-//!     async fn create(&self, id: &str, user: u64, created_at: DateTime<Utc>,
+//!     async fn create(&self, id: &Digest, user: u64, created_at: DateTime<Utc>,
 //!         expires_at: DateTime<Utc>, last_activity: DateTime<Utc>) -> Result<(), vivarium_web::ApiError> {
-//!         self.0.lock().insert(id.to_string(), SessionRecord {
+//!         self.0.lock().insert(id.as_str().to_string(), SessionRecord {
 //!             user_id: user, created_at, expires_at, last_activity,
 //!         });
 //!         Ok(())
 //!     }
-//!     async fn find(&self, id: &str) -> Result<Option<SessionRecord<u64>>, vivarium_web::ApiError> {
-//!         Ok(self.0.lock().get(id).cloned())
+//!     async fn find(&self, id: &Digest) -> Result<Option<SessionRecord<u64>>, vivarium_web::ApiError> {
+//!         Ok(self.0.lock().get(id.as_str()).cloned())
 //!     }
-//!     async fn touch(&self, id: &str, expires_at: DateTime<Utc>, last_activity: DateTime<Utc>)
+//!     async fn touch(&self, id: &Digest, expires_at: DateTime<Utc>, last_activity: DateTime<Utc>)
 //!         -> Result<(), vivarium_web::ApiError> {
-//!         if let Some(record) = self.0.lock().get_mut(id) {
+//!         if let Some(record) = self.0.lock().get_mut(id.as_str()) {
 //!             record.expires_at = expires_at;
 //!             record.last_activity = last_activity;
 //!         }
 //!         Ok(())
 //!     }
-//!     async fn remove(&self, id: &str) -> Result<bool, vivarium_web::ApiError> {
-//!         Ok(self.0.lock().remove(id).is_some())
+//!     async fn remove(&self, id: &Digest) -> Result<bool, vivarium_web::ApiError> {
+//!         Ok(self.0.lock().remove(id.as_str()).is_some())
 //!     }
 //!     async fn remove_by_user(&self, user: u64) -> Result<u64, vivarium_web::ApiError> {
 //!         let mut store = self.0.lock();
@@ -75,8 +76,8 @@
 //! let auth = SessionAuth::new(
 //!     MyStore::default(),
 //!     CookieOptions::new("sid"),
-//!     Duration::from_secs(3600),
-//!     Some(Duration::from_secs(12 * 3600)),
+//!     Ttl::try_new(Duration::from_secs(3600)).expect("non-zero TTL"),
+//!     Some(Ttl::try_new(Duration::from_secs(12 * 3600)).expect("non-zero TTL")),
 //! );
 //! let app: Router = Router::new().route("/me", get(me)).layer(session_layer(auth));
 //! # }
@@ -97,7 +98,7 @@ use percent_encoding::percent_decode_str;
 pub use cookie::SameSite;
 
 use crate::error::ApiError;
-use crate::secrets::{generate_token, hash_token};
+use crate::secrets::{Digest, Ttl, generate_token};
 use crate::texts::texts;
 
 /// The cookie carrying a session id.
@@ -155,18 +156,19 @@ impl CookieOptions {
 /// 32 bytes from the operating system CSPRNG, base64url without padding. The
 /// cookie carries this string; the store carries its
 /// [`digest`](SessionId::digest) — the library hashes before every store call,
-/// so the raw value never reaches storage or logs.
+/// so the raw value never reaches storage or logs. Build one with
+/// [`SessionId::try_new`], or take the one [`SessionAuth::start`] minted.
 ///
 /// The extractor of the same name hands the authenticated session's id to a
 /// handler, which is what logout needs:
 ///
 /// ```
 /// # use vivarium_web::session::SessionId;
-/// let id = SessionId("8Qm…".to_string());
-/// assert_eq!(id.digest().len(), 64);
+/// let id = SessionId::try_new("8Qm…").expect("non-empty");
+/// assert_eq!(id.digest().as_str().len(), 64);
 /// ```
 #[derive(Clone, PartialEq, Eq)]
-pub struct SessionId(pub String);
+pub struct SessionId(String);
 
 impl std::fmt::Debug for SessionId {
     /// Prints the digest, not the credential: an id is valid until its session
@@ -180,12 +182,29 @@ impl std::fmt::Debug for SessionId {
 }
 
 impl SessionId {
+    /// Validates an id: it must not be empty or whitespace-only.
+    ///
+    /// An empty id hashes to a fixed digest, so it must not be able to reach a
+    /// store lookup or a cookie; the middleware drops an unparseable cookie
+    /// the same way it drops an unknown session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionIdError`] for an empty or whitespace-only id.
+    pub fn try_new(id: impl Into<String>) -> Result<Self, SessionIdError> {
+        let id = id.into();
+        if id.trim().is_empty() {
+            return Err(SessionIdError);
+        }
+        Ok(Self(id))
+    }
+
     /// The SHA-256 digest of this id, as stored and looked up.
     ///
-    /// Calls [`hash_token`]; stores are expected to persist
-    /// and query by this value, never by the raw id.
-    pub fn digest(&self) -> String {
-        hash_token(&self.0)
+    /// Returns a [`Digest`]; stores are expected to persist and query by this
+    /// value, never by the raw id.
+    pub fn digest(&self) -> Digest {
+        Digest::of_token(&self.0)
     }
 
     /// The raw id, as carried in the cookie.
@@ -198,6 +217,11 @@ impl SessionId {
         Self(generate_token())
     }
 }
+
+/// Returned by [`SessionId::try_new`] for an empty or whitespace-only id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a session id must not be empty")]
+pub struct SessionIdError;
 
 /// A stored session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,7 +242,7 @@ pub struct SessionRecord<U = i64> {
 /// `sessions(session_id VARCHAR(64) UNIQUE, user_id, created_at, expires_at,
 /// last_activity)`.
 ///
-/// Every `id` this trait receives is a SHA-256 digest
+/// Every `id` this trait receives is a [`Digest`]
 /// ([`SessionId::digest`](SessionId::digest)), never the value the client holds
 /// — store and compare it as-is. Times are UTC; adapt the columns to your
 /// driver (a `DATETIME`/`TIMESTAMP` column, or epoch seconds). `remove` returns
@@ -233,7 +257,7 @@ pub trait SessionStore: Send + Sync + 'static {
     /// Persists a new session.
     fn create(
         &self,
-        id: &str,
+        id: &Digest,
         user: Self::UserId,
         created_at: DateTime<Utc>,
         expires_at: DateTime<Utc>,
@@ -243,19 +267,19 @@ pub trait SessionStore: Send + Sync + 'static {
     /// Returns the session with this digest, if it exists.
     fn find(
         &self,
-        id: &str,
+        id: &Digest,
     ) -> impl Future<Output = Result<Option<SessionRecord<Self::UserId>>, ApiError>> + Send;
 
     /// Updates the expiry and activity timestamps of an existing session.
     fn touch(
         &self,
-        id: &str,
+        id: &Digest,
         expires_at: DateTime<Utc>,
         last_activity: DateTime<Utc>,
     ) -> impl Future<Output = Result<(), ApiError>> + Send;
 
     /// Deletes one session; returns whether a row was deleted.
-    fn remove(&self, id: &str) -> impl Future<Output = Result<bool, ApiError>> + Send;
+    fn remove(&self, id: &Digest) -> impl Future<Output = Result<bool, ApiError>> + Send;
 
     /// Deletes every session of a user (logout everywhere); returns the number
     /// of rows deleted.
@@ -271,8 +295,8 @@ pub trait SessionStore: Send + Sync + 'static {
 pub struct SessionAuth<S> {
     store: S,
     cookie: CookieOptions,
-    ttl: Duration,
-    absolute_ttl: Option<Duration>,
+    ttl: Ttl,
+    absolute_ttl: Option<Ttl>,
 }
 
 impl<S> SessionAuth<S> {
@@ -282,12 +306,7 @@ impl<S> SessionAuth<S> {
     /// `absolute_ttl` optionally caps the total lifetime, after which the
     /// session dies no matter how active it is (`None` keeps it renewable
     /// forever).
-    pub fn new(
-        store: S,
-        cookie: CookieOptions,
-        ttl: Duration,
-        absolute_ttl: Option<Duration>,
-    ) -> Self {
+    pub fn new(store: S, cookie: CookieOptions, ttl: Ttl, absolute_ttl: Option<Ttl>) -> Self {
         Self {
             store,
             cookie,
@@ -308,12 +327,12 @@ impl<S> SessionAuth<S> {
 
     /// The sliding session TTL.
     pub fn ttl(&self) -> Duration {
-        self.ttl
+        self.ttl.get()
     }
 
     /// The absolute session lifetime cap, if one is configured.
     pub fn absolute_ttl(&self) -> Option<Duration> {
-        self.absolute_ttl
+        self.absolute_ttl.map(Ttl::get)
     }
 
     /// The instant `created_at` stops being renewable.
@@ -323,7 +342,7 @@ impl<S> SessionAuth<S> {
     fn deadline(&self, created_at: DateTime<Utc>) -> Option<DateTime<Utc>> {
         self.absolute_ttl.map(|cap| {
             created_at
-                .checked_add_signed(delta(cap))
+                .checked_add_signed(delta(cap.get()))
                 .unwrap_or(DateTime::<Utc>::MAX_UTC)
         })
     }
@@ -332,7 +351,7 @@ impl<S> SessionAuth<S> {
     /// TTL, capped by the absolute deadline.
     fn expiry(&self, created_at: DateTime<Utc>, now: DateTime<Utc>) -> DateTime<Utc> {
         let sliding = now
-            .checked_add_signed(delta(self.ttl))
+            .checked_add_signed(delta(self.ttl.get()))
             .unwrap_or(DateTime::<Utc>::MAX_UTC);
         match self.deadline(created_at) {
             Some(deadline) => sliding.min(deadline),
@@ -396,10 +415,8 @@ impl<S: SessionStore> SessionAuth<S> {
 
     /// The lifetime `start` gives a fresh session, in seconds.
     fn fresh_max_age(&self) -> u64 {
-        self.absolute_ttl
-            .unwrap_or(self.ttl)
-            .min(self.ttl)
-            .as_secs()
+        let cap = self.absolute_ttl.map_or(self.ttl.get(), Ttl::get);
+        cap.min(self.ttl.get()).as_secs()
     }
 
     /// The `Set-Cookie` header value that expires the session cookie
@@ -564,7 +581,9 @@ where
 {
     Box::pin(async move {
         let cookie = cookie_value(request.headers(), &auth.cookie().name);
-        let session = cookie.as_deref().map(|raw| SessionId(raw.to_string()));
+        let session = cookie
+            .as_deref()
+            .and_then(|raw| SessionId::try_new(raw).ok());
         let digest = session.as_ref().map(SessionId::digest);
         let now = Utc::now();
         let mut live: Option<SessionRecord<S::UserId>> = None;
@@ -634,7 +653,7 @@ where
                     }
                 }
             }
-            _ if session.is_some() && !lookup_error && !handler_owns_cookie => {
+            _ if cookie.is_some() && !lookup_error && !handler_owns_cookie => {
                 // Stale cookie (unknown or dead session): expire it.
                 response
                     .headers_mut()
@@ -659,11 +678,11 @@ where
 /// - The unquoted value is then percent-decoded — the inverse of the
 ///   [`encoded()`](cookie::Cookie::encoded) form [`SessionAuth`] writes — so an
 ///   id that needed escaping on the way out is found again on the way in.
-/// - A value-less `name=` yields an empty string rather than being dropped: no
-///   digest matches it, so the middleware treats it as a stale cookie and
-///   clears it. The same holds for a value whose escapes are not valid UTF-8:
-///   the replacement characters cannot match a session, and the junk cookie is
-///   cleared instead of ignored.
+/// - A value-less `name=` yields an empty string rather than being dropped: it
+///   fails [`SessionId::try_new`], so the middleware treats the cookie as
+///   stale and clears it. The same holds for a value whose escapes are not
+///   valid UTF-8: the replacement characters cannot match a session, and the
+///   junk cookie is cleared instead of ignored.
 /// - Segments that fail to parse (no `=`, an empty name) are skipped, and other
 ///   cookies are ignored.
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -692,6 +711,7 @@ fn sets_cookie(headers: &HeaderMap, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::hash_token;
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -730,14 +750,14 @@ mod tests {
 
         async fn create(
             &self,
-            id: &str,
+            id: &Digest,
             user: u64,
             created_at: DateTime<Utc>,
             expires_at: DateTime<Utc>,
             last_activity: DateTime<Utc>,
         ) -> Result<(), ApiError> {
             self.insert(
-                id,
+                id.as_str(),
                 SessionRecord {
                     user_id: user,
                     created_at,
@@ -748,25 +768,25 @@ mod tests {
             Ok(())
         }
 
-        async fn find(&self, id: &str) -> Result<Option<SessionRecord<u64>>, ApiError> {
-            Ok(self.get(id))
+        async fn find(&self, id: &Digest) -> Result<Option<SessionRecord<u64>>, ApiError> {
+            Ok(self.get(id.as_str()))
         }
 
         async fn touch(
             &self,
-            id: &str,
+            id: &Digest,
             expires_at: DateTime<Utc>,
             last_activity: DateTime<Utc>,
         ) -> Result<(), ApiError> {
-            if let Some(record) = self.0.lock().get_mut(id) {
+            if let Some(record) = self.0.lock().get_mut(id.as_str()) {
                 record.expires_at = expires_at;
                 record.last_activity = last_activity;
             }
             Ok(())
         }
 
-        async fn remove(&self, id: &str) -> Result<bool, ApiError> {
-            Ok(self.0.lock().remove(id).is_some())
+        async fn remove(&self, id: &Digest) -> Result<bool, ApiError> {
+            Ok(self.0.lock().remove(id.as_str()).is_some())
         }
 
         async fn remove_by_user(&self, user: u64) -> Result<u64, ApiError> {
@@ -779,8 +799,17 @@ mod tests {
 
     const TTL: Duration = Duration::from_secs(120);
 
+    fn ttl(duration: Duration) -> Ttl {
+        Ttl::try_new(duration).expect("non-zero test ttl")
+    }
+
     fn auth<S: SessionStore + Clone>(store: S, absolute_ttl: Option<Duration>) -> SessionAuth<S> {
-        SessionAuth::new(store, CookieOptions::new("sid"), TTL, absolute_ttl)
+        SessionAuth::new(
+            store,
+            CookieOptions::new("sid"),
+            ttl(TTL),
+            absolute_ttl.map(ttl),
+        )
     }
 
     fn record(
@@ -965,7 +994,8 @@ mod tests {
             .route(
                 "/login",
                 get(move |SessionCtx { user_id }: SessionCtx<u64>| {
-                    let value = handler_auth.set_cookie_value(&SessionId("s2".to_string()));
+                    let value = handler_auth
+                        .set_cookie_value(&SessionId::try_new("s2").expect("non-empty"));
                     async move { ([(header::SET_COOKIE, value)], format!("ok {user_id}")) }
                 }),
             )
@@ -997,7 +1027,7 @@ mod tests {
 
         async fn create(
             &self,
-            _id: &str,
+            _id: &Digest,
             _user: u64,
             _created_at: DateTime<Utc>,
             _expires_at: DateTime<Utc>,
@@ -1006,20 +1036,20 @@ mod tests {
             Ok(())
         }
 
-        async fn find(&self, _id: &str) -> Result<Option<SessionRecord<u64>>, ApiError> {
+        async fn find(&self, _id: &Digest) -> Result<Option<SessionRecord<u64>>, ApiError> {
             Err(ApiError::internal("lookup failed"))
         }
 
         async fn touch(
             &self,
-            _id: &str,
+            _id: &Digest,
             _expires_at: DateTime<Utc>,
             _last_activity: DateTime<Utc>,
         ) -> Result<(), ApiError> {
             Ok(())
         }
 
-        async fn remove(&self, _id: &str) -> Result<bool, ApiError> {
+        async fn remove(&self, _id: &Digest) -> Result<bool, ApiError> {
             Ok(false)
         }
 
@@ -1054,10 +1084,10 @@ mod tests {
 
         assert_eq!(
             store.keys(),
-            vec![id.digest()],
+            vec![id.digest().as_str().to_owned()],
             "the store must key sessions by digest"
         );
-        assert_eq!(id.digest().len(), 64);
+        assert_eq!(id.digest().as_str().len(), 64);
         assert!(
             !store.contains(id.as_str()),
             "the raw id must never reach the store"
@@ -1097,16 +1127,16 @@ mod tests {
         assert_ne!(first.digest(), second.digest(), "ids must be unique");
 
         auth.end(&first).await.expect("end");
-        assert!(!store.contains(&first.digest()));
+        assert!(!store.contains(first.digest().as_str()));
         auth.end(&first).await.expect("end is idempotent");
 
         assert_eq!(auth.end_for_user(7).await.expect("end_for_user"), 1);
-        assert!(store.contains(&other.digest()));
+        assert!(store.contains(other.digest().as_str()));
     }
 
     #[tokio::test]
     async fn cookie_attributes_default_to_secure_http_only_lax() {
-        let id = SessionId("raw".to_string());
+        let id = SessionId::try_new("raw").expect("non-empty");
         let secure = auth(InMemorySessionStore::default(), None);
         let cookie = secure
             .set_cookie_value(&id)
@@ -1124,7 +1154,7 @@ mod tests {
         let insecure = SessionAuth::new(
             InMemorySessionStore::default(),
             CookieOptions::new("sid").insecure(),
-            TTL,
+            ttl(TTL),
             None,
         );
         let cookie = insecure
@@ -1276,13 +1306,13 @@ mod tests {
 
     #[test]
     fn login_cookie_never_outlives_a_shorter_absolute_cap() {
-        let id = SessionId("raw".to_string());
+        let id = SessionId::try_new("raw").expect("non-empty");
 
         let capped = SessionAuth::new(
             InMemorySessionStore::default(),
             CookieOptions::new("sid"),
-            Duration::from_secs(86_400),
-            Some(Duration::from_secs(3600)),
+            ttl(Duration::from_secs(86_400)),
+            Some(ttl(Duration::from_secs(3600))),
         );
         assert_eq!(
             max_age(capped.set_cookie_value(&id).to_str().unwrap()),
@@ -1297,8 +1327,18 @@ mod tests {
     }
 
     #[test]
+    fn session_id_try_new_rejects_empty_and_blank() {
+        assert!(SessionId::try_new("").is_err());
+        assert!(SessionId::try_new("   ").is_err());
+        assert_eq!(
+            SessionId::try_new("raw").expect("non-empty").as_str(),
+            "raw"
+        );
+    }
+
+    #[test]
     fn session_id_debug_prints_the_digest_not_the_credential() {
-        let id = SessionId("a-bearer-credential".to_string());
+        let id = SessionId::try_new("a-bearer-credential").expect("non-empty");
         let printed = format!("{id:?}");
 
         assert!(!printed.contains("a-bearer-credential"), "{printed}");
@@ -1360,7 +1400,7 @@ mod tests {
         let auth = auth(store.clone(), None);
         // An id that has to be escaped on the way out, to exercise the
         // encoder/decoder pair rather than the identity path.
-        let id = SessionId("ab+cd/ef".to_string());
+        let id = SessionId::try_new("ab+cd/ef").expect("non-empty");
         let set_cookie = auth
             .set_cookie_value(&id)
             .to_str()
@@ -1376,7 +1416,7 @@ mod tests {
             .next()
             .expect("a name=value pair")
             .to_string();
-        store.insert(&id.digest(), record(7, now, now + delta(TTL), now));
+        store.insert(id.digest().as_str(), record(7, now, now + delta(TTL), now));
 
         let app = me_app(auth);
         let (status, response) = drive(app, req_get("/me", Some(&request_cookie))).await;
@@ -1389,7 +1429,7 @@ mod tests {
         // The writer escapes the quotes, so the wire value carries no literal
         // `"`. Unquoting has to happen *before* decoding, or the id would come
         // back as `abc` and never match its own session.
-        let id = SessionId("\"abc\"".to_string());
+        let id = SessionId::try_new("\"abc\"").expect("non-empty");
         let auth = auth(InMemorySessionStore::default(), None);
         let set_cookie = auth
             .set_cookie_value(&id)

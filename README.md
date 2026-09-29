@@ -201,6 +201,7 @@ binds there).
 
 ```rust,no_run
 use serde::{Deserialize, Serialize};
+use vivarium_rs::Secret;
 use vivarium_rs::jwt::{decode_token, sign_token};
 
 const SECRET: &str = "load this from the environment";
@@ -212,14 +213,15 @@ struct Claims {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let token = sign_token(&Claims { sub: 7, exp: 0 }, SECRET)?;
-    let claims: Claims = decode_token(&token, SECRET)?;   // HS256 fixed; RS256 rejected
+    let secret = Secret::try_new(SECRET)?;
+    let token = sign_token(&Claims { sub: 7, exp: 0 }, &secret)?;
+    let claims: Claims = decode_token(&token, &secret)?;   // HS256 fixed; RS256 rejected
     assert_eq!(claims.sub, 7);
     Ok(())
 }
 ```
 
-Or as middleware: `.route_layer(vivarium_rs::jwt::jwt_auth::<Claims>(SECRET.into()))`
+Or as middleware: `.route_layer(vivarium_rs::jwt::jwt_auth::<Claims>(secret))`
 puts the decoded claims into request extensions. [`JwtVerifier`] wraps the same
 machinery with a configuration (leeway, `aud`/`iss`, required claims) and a
 key ring that keeps retired secrets verifying through a rotation.
@@ -231,7 +233,7 @@ key ring that keeps retired secrets verifying through a rotation.
 ```rust,no_run
 use std::time::Duration;
 use axum::{Router, routing::get};
-use vivarium_rs::{CookieOptions, SessionAuth, SessionCtx, SessionStore, session_layer};
+use vivarium_rs::{CookieOptions, SessionAuth, SessionCtx, SessionStore, Ttl, session_layer};
 
 // `S` is your `SessionStore` implementation: the table is app-owned, and
 // `vivarium_web::session`'s module docs carry a complete in-memory store to
@@ -246,8 +248,8 @@ where
     let auth = SessionAuth::new(
         store,
         CookieOptions::new("sid"),               // Secure; HttpOnly; SameSite=Lax; Path=/
-        Duration::from_hours(24),                // slides while the session is used
-        Some(Duration::from_hours(24 * 7)),      // absolute cap, never extended past
+        Ttl::try_new(Duration::from_hours(24)).expect("non-zero TTL"),
+        Some(Ttl::try_new(Duration::from_hours(24 * 7)).expect("non-zero TTL")),
     );
     Router::new()
         .route(

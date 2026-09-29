@@ -4,6 +4,44 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Breaking
+
+- Credentials and lifetimes are parsed once, at construction: `KeyRing::new`,
+  `sign_token`, `decode_token` and `jwt_auth` take a `Secret`
+  (`Secret::try_new` rejects empty and whitespace-only values), and
+  `RefreshTokenManager::new` / `SessionAuth::new` take `Ttl` values
+  (`Ttl::try_new` rejects `Duration::ZERO`). An empty HS256 key used to sign
+  **and** verify, so a deployment whose secret came out empty accepted
+  attacker-minted tokens; a zero access/refresh TTL minted tokens that were
+  born expired, and a zero session TTL made login silently useless.
+- `KeyRing`'s `primary`/`previous` fields are `Secret` now, and its `Debug`
+  prints `<redacted>`: the derived one leaked the signing key, unlike
+  `SessionId`/`RefreshTokenManager`/`VerifyOutcome`, which already redact.
+- `JwtConfig::required_spec_claims` no longer replaces the `exp` requirement
+  — `exp` is always required, which is what the field's docs already promised
+  ("on top of `exp`"). An empty list, or a mis-cased `"Exp"` entry, no longer
+  disables it.
+- `SessionId`'s field is private; build it with `SessionId::try_new` (empty
+  and whitespace-only ids are rejected). `SessionId::digest()` returns the new
+  `Digest` type, and `SessionStore`/`RefreshTokenStore` take `&Digest` rather
+  than `&str`, so a store implementation can no longer confuse the raw
+  credential with its digest. A store keyed by a `VARCHAR(64)` column keeps
+  working through `digest.as_str()`; a store that wants the type itself can
+  key by it.
+- `Argon2Params`' fields are private: build with
+  `Argon2Params::try_new(m_cost, t_cost, p_cost)` (or `Default`) and read them
+  through the `m_cost()`/`t_cost()`/`p_cost()` accessors. Zeroed parameters
+  used to surface as a 500 on the first `hash()`/login and made `needs_rehash`
+  answer "no upgrade" forever.
+
+### Added
+
+- `secrets::{Secret, Ttl, Digest}`, with `SecretError`/`TtlError`/
+  `DigestError`, plus `SessionIdError` and `Argon2ParamsError` — the checked
+  values the authentication surface consumes.
+
 ## 0.3.4 — 2026-09-14
 
 ### Changed

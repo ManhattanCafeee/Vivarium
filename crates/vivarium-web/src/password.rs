@@ -75,12 +75,9 @@ static DUMMY_HASH: LazyLock<Result<String, String>> = LazyLock::new(|| {
 /// verifying unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Argon2Params {
-    /// Memory cost, in KiB.
-    pub m_cost: u32,
-    /// Time cost: how many passes over that memory.
-    pub t_cost: u32,
-    /// Parallelism: how many lanes.
-    pub p_cost: u32,
+    m_cost: u32,
+    t_cost: u32,
+    p_cost: u32,
 }
 
 impl Default for Argon2Params {
@@ -94,6 +91,43 @@ impl Default for Argon2Params {
 }
 
 impl Argon2Params {
+    /// Validates cost parameters, rejecting anything argon2 itself would
+    /// refuse: zero memory, zero passes, zero lanes, or memory below
+    /// `8 * p_cost`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Argon2ParamsError`] when argon2 rejects the combination.
+    pub fn try_new(m_cost: u32, t_cost: u32, p_cost: u32) -> Result<Self, Argon2ParamsError> {
+        // `Params::new` multiplies `p_cost` by 8 before it bounds-checks
+        // `p_cost`, which overflows `u32` in debug builds; reject the value
+        // here so the constructor returns an error instead of panicking.
+        if p_cost > Params::MAX_P_COST {
+            return Err(Argon2ParamsError);
+        }
+        Params::new(m_cost, t_cost, p_cost, None).map_err(|_| Argon2ParamsError)?;
+        Ok(Self {
+            m_cost,
+            t_cost,
+            p_cost,
+        })
+    }
+
+    /// Memory cost, in KiB.
+    pub fn m_cost(&self) -> u32 {
+        self.m_cost
+    }
+
+    /// Time cost: how many passes over that memory.
+    pub fn t_cost(&self) -> u32 {
+        self.t_cost
+    }
+
+    /// Parallelism: how many lanes.
+    pub fn p_cost(&self) -> u32 {
+        self.p_cost
+    }
+
     /// The Argon2 hasher these parameters describe.
     fn hasher(self) -> Result<Argon2<'static>, ApiError> {
         // `argon2::Error` is `no_std` and carries no `Error` impl; a PHC error
@@ -104,6 +138,11 @@ impl Argon2Params {
         Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
     }
 }
+
+/// Returned by [`Argon2Params::try_new`] for cost parameters argon2 rejects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid Argon2 parameters")]
+pub struct Argon2ParamsError;
 
 /// The outcome of [`verify_and_upgrade`].
 #[derive(Clone, PartialEq, Eq)]
@@ -200,9 +239,9 @@ pub fn needs_rehash(stored_hash: &str, params: Argon2Params) -> Result<bool, Api
         return Ok(true);
     }
     let current = Params::try_from(&parsed).map_err(ApiError::internal)?;
-    Ok(current.m_cost() < params.m_cost
-        || current.t_cost() < params.t_cost
-        || current.p_cost() < params.p_cost)
+    Ok(current.m_cost() < params.m_cost()
+        || current.t_cost() < params.t_cost()
+        || current.p_cost() < params.p_cost())
 }
 
 /// Verifies a login and, when the stored hash has aged, re-hashes it.
@@ -253,9 +292,9 @@ mod tests {
     #[test]
     fn default_params_match_the_reference_profile() {
         let params = Argon2Params::default();
-        assert_eq!(params.m_cost, 19 * 1024);
-        assert_eq!(params.t_cost, 2);
-        assert_eq!(params.p_cost, 1);
+        assert_eq!(params.m_cost(), 19 * 1024);
+        assert_eq!(params.t_cost(), 2);
+        assert_eq!(params.p_cost(), 1);
 
         // Existing hashes (Argon2id v19, those costs) need no upgrade.
         let stored = hash("correct horse battery staple").expect("hash succeeds");
@@ -267,14 +306,26 @@ mod tests {
     }
 
     #[test]
+    fn try_new_rejects_zero_costs() {
+        assert!(Argon2Params::try_new(0, 2, 1).is_err());
+        assert!(Argon2Params::try_new(19 * 1024, 0, 1).is_err());
+        assert!(Argon2Params::try_new(19 * 1024, 2, 0).is_err());
+        // `p_cost * 8` overflows below argon2's own `p_cost` bound; the
+        // constructor must reject it rather than panic in a debug build.
+        assert!(Argon2Params::try_new(19 * 1024, 2, 0x2000_0000).is_err());
+        assert_eq!(
+            Argon2Params::try_new(19 * 1024, 2, 1)
+                .expect("valid params")
+                .m_cost(),
+            19 * 1024
+        );
+    }
+
+    #[test]
     fn weaker_hashes_are_flagged_for_rehash() {
         let weak = hash_with(
             "hunter2",
-            Argon2Params {
-                m_cost: 1024,
-                t_cost: 1,
-                p_cost: 1,
-            },
+            Argon2Params::try_new(1024, 1, 1).expect("valid params"),
         )
         .expect("hash succeeds");
         assert!(needs_rehash(&weak, Argon2Params::default()).expect("inspects"));
@@ -353,11 +404,7 @@ mod tests {
     fn stronger_hashes_are_left_alone() {
         let strong = hash_with(
             "hunter2",
-            Argon2Params {
-                m_cost: 65_536,
-                t_cost: 4,
-                p_cost: 2,
-            },
+            Argon2Params::try_new(65_536, 4, 2).expect("valid params"),
         )
         .expect("hash succeeds");
 

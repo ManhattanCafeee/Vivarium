@@ -19,6 +19,7 @@
 //! use axum::{Extension, Router, routing::get};
 //! use serde::{Deserialize, Serialize};
 //! use vivarium_web::jwt::{JwtConfig, JwtVerifier, KeyRing};
+//! use vivarium_web::secrets::Secret;
 //!
 //! #[derive(Clone, Serialize, Deserialize)]
 //! struct Claims {
@@ -28,7 +29,7 @@
 //!
 //! let verifier = JwtVerifier::new(
 //!     JwtConfig::default(),
-//!     KeyRing::new("current-secret"),
+//!     KeyRing::new(Secret::try_new("current-secret").expect("non-empty")),
 //! );
 //! let token = verifier.encode(&Claims { sub: 7, exp: 4_000_000_000 }).expect("sign");
 //! let claims: Claims = verifier.decode(&token).expect("verify");
@@ -42,6 +43,7 @@
 //! ```
 
 use std::collections::HashSet;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -55,6 +57,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::ApiError;
+use crate::secrets::Secret;
 use crate::texts::texts;
 use crate::varser::get_authorization;
 
@@ -106,26 +109,40 @@ impl Default for JwtConfig {
 /// verified against `primary` first and then against each of `previous` in
 /// order, which is what lets a rotation overlap (old tokens keep verifying
 /// until they expire, new ones are only accepted under the new secret).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct KeyRing {
     /// The secret new tokens are signed with.
-    pub primary: String,
+    pub primary: Secret,
     /// Retired secrets that still verify, newest first.
-    pub previous: Vec<String>,
+    pub previous: Vec<Secret>,
 }
 
 impl KeyRing {
     /// A ring with a single signing key.
-    pub fn new(primary: impl Into<String>) -> Self {
+    pub fn new(primary: Secret) -> Self {
         Self {
-            primary: primary.into(),
+            primary,
             previous: Vec::new(),
         }
     }
 
     /// The secrets to try when verifying, in order.
     fn verification_keys(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.primary.as_str()).chain(self.previous.iter().map(String::as_str))
+        std::iter::once(self.primary.as_str()).chain(self.previous.iter().map(Secret::as_str))
+    }
+}
+
+impl fmt::Debug for KeyRing {
+    /// Prints `<redacted>` for every key: the derived `Debug` used to leak the
+    /// signing secret into logs.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeyRing")
+            .field("primary", &"<redacted>")
+            .field(
+                "previous",
+                &format!("<redacted; {} keys>", self.previous.len()),
+            )
+            .finish()
     }
 }
 
@@ -134,8 +151,12 @@ impl KeyRing {
 ///
 /// ```
 /// use vivarium_web::jwt::{JwtConfig, JwtVerifier, KeyRing};
+/// use vivarium_web::secrets::Secret;
 ///
-/// let verifier = JwtVerifier::new(JwtConfig::default(), KeyRing::new("secret"));
+/// let verifier = JwtVerifier::new(
+///     JwtConfig::default(),
+///     KeyRing::new(Secret::try_new("secret").expect("non-empty")),
+/// );
 /// let token = verifier.encode(&serde_json::json!({ "sub": 1, "exp": 4_000_000_000_i64 }))
 ///     .expect("sign");
 /// let claims: serde_json::Value = verifier.decode(&token).expect("verify");
@@ -247,6 +268,9 @@ impl JwtVerifier {
             .iter()
             .cloned()
             .collect::<HashSet<_>>();
+        // `exp` is always required: the field can add claims, never drop this
+        // one, matching its documented "on top of `exp`" contract.
+        validation.required_spec_claims.insert("exp".to_string());
         match &self.config.audience {
             Some(audience) => {
                 validation.set_audience(std::slice::from_ref(audience));
@@ -273,8 +297,8 @@ impl JwtVerifier {
 /// Shorthand for [`JwtVerifier::encode`] with the default configuration and a
 /// single key; build a [`JwtVerifier`] when you need leeway, audience, issuer
 /// or key rotation.
-pub fn sign_token<T: Serialize>(claims: &T, secret: &str) -> Result<String, ApiError> {
-    JwtVerifier::new(JwtConfig::default(), KeyRing::new(secret)).encode(claims)
+pub fn sign_token<T: Serialize>(claims: &T, secret: &Secret) -> Result<String, ApiError> {
+    JwtVerifier::new(JwtConfig::default(), KeyRing::new(secret.clone())).encode(claims)
 }
 
 /// Decode and validate `token` into claims of type `T`.
@@ -283,8 +307,8 @@ pub fn sign_token<T: Serialize>(claims: &T, secret: &str) -> Result<String, ApiE
 /// single key. A rejected token is a 401 whose message is the catalog's
 /// [`unauthorized`](crate::texts::Texts::unauthorized) text; the reason stays
 /// in the error source, where it is logged.
-pub fn decode_token<T: DeserializeOwned>(token: &str, secret: &str) -> Result<T, ApiError> {
-    JwtVerifier::new(JwtConfig::default(), KeyRing::new(secret)).decode(token)
+pub fn decode_token<T: DeserializeOwned>(token: &str, secret: &Secret) -> Result<T, ApiError> {
+    JwtVerifier::new(JwtConfig::default(), KeyRing::new(secret.clone())).decode(token)
 }
 
 /// The boxed future returned by the JWT authentication middlewares.
@@ -361,10 +385,11 @@ where
 /// # use axum::Extension;
 /// # use serde::{Deserialize, Serialize};
 /// # use vivarium_web::jwt::jwt_auth;
+/// # use vivarium_web::secrets::Secret;
 /// # #[derive(Clone, Serialize, Deserialize)]
 /// # struct Claims { sub: String }
 /// # fn example() {
-/// # let secret = "s3cret".to_string();
+/// # let secret = Secret::try_new("s3cret").expect("non-empty");
 /// let app: axum::Router = axum::Router::new()
 ///     .route("/me", axum::routing::get(
 ///         |Extension(claims): Extension<Claims>| async move { claims.sub }
@@ -375,7 +400,7 @@ where
 ///
 /// Failures produce a 401 whose message is the catalog's
 /// [`unauthorized`](crate::texts::Texts::unauthorized) text.
-pub fn jwt_auth<T>(secret: String) -> JwtAuthLayer
+pub fn jwt_auth<T>(secret: Secret) -> JwtAuthLayer
 where
     T: DeserializeOwned + Send + Sync + Clone + 'static,
 {
@@ -419,8 +444,12 @@ mod tests {
         jsonwebtoken::get_current_timestamp() as i64 + 3600
     }
 
+    fn secret(raw: &str) -> Secret {
+        Secret::try_new(raw).expect("non-empty test secret")
+    }
+
     fn verifier() -> JwtVerifier {
-        JwtVerifier::new(JwtConfig::default(), KeyRing::new(SECRET))
+        JwtVerifier::new(JwtConfig::default(), KeyRing::new(secret(SECRET)))
     }
 
     async fn drive(app: Router, req: Request<Body>) -> (StatusCode, Response) {
@@ -482,7 +511,7 @@ mod tests {
 
     #[test]
     fn wrong_secret_is_unauthorized_with_the_catalog_message() {
-        let token = sign_token(&claims(future_exp()), "other-secret").expect("sign");
+        let token = sign_token(&claims(future_exp()), &secret("other-secret")).expect("sign");
         let error = verifier()
             .decode::<TestClaims>(&token)
             .expect_err("must reject");
@@ -515,7 +544,7 @@ mod tests {
                 leeway: Duration::ZERO,
                 ..JwtConfig::default()
             },
-            KeyRing::new(SECRET),
+            KeyRing::new(secret(SECRET)),
         );
         assert!(strict.decode::<TestClaims>(&recent).is_err());
     }
@@ -523,13 +552,13 @@ mod tests {
     #[test]
     fn previous_keys_verify_but_never_sign() {
         let ring = KeyRing {
-            primary: "new-secret".to_string(),
-            previous: vec!["old-secret".to_string()],
+            primary: secret("new-secret"),
+            previous: vec![secret("old-secret")],
         };
         let verifier = JwtVerifier::new(JwtConfig::default(), ring);
         let claims = claims(future_exp());
 
-        let old_token = sign_token(&claims, "old-secret").expect("sign");
+        let old_token = sign_token(&claims, &secret("old-secret")).expect("sign");
         assert_eq!(
             verifier
                 .decode::<TestClaims>(&old_token)
@@ -542,7 +571,7 @@ mod tests {
         assert!(verifier.decode::<TestClaims>(&new_token).is_ok());
         // A ring without the retired key accepts the new token and rejects the
         // old one: `encode` signs with `primary` only.
-        let rotated = JwtVerifier::new(JwtConfig::default(), KeyRing::new("new-secret"));
+        let rotated = JwtVerifier::new(JwtConfig::default(), KeyRing::new(secret("new-secret")));
         assert!(
             rotated.decode::<TestClaims>(&new_token).is_ok(),
             "a freshly signed token must verify under the primary key alone"
@@ -558,7 +587,7 @@ mod tests {
                 issuer: Some("vivarium-auth".to_string()),
                 ..JwtConfig::default()
             },
-            KeyRing::new(SECRET),
+            KeyRing::new(secret(SECRET)),
         );
 
         let good = scoped
@@ -657,7 +686,7 @@ mod tests {
                 required_spec_claims: vec!["exp".to_string(), "iss".to_string()],
                 ..JwtConfig::default()
             },
-            KeyRing::new(SECRET),
+            KeyRing::new(secret(SECRET)),
         );
 
         let without_iss = demanding.encode(&claims(future_exp())).expect("sign");
@@ -695,7 +724,7 @@ mod tests {
 
     #[tokio::test]
     async fn jwt_auth_free_function_still_authenticates() {
-        let token = sign_token(&claims(future_exp()), SECRET).expect("sign");
+        let token = sign_token(&claims(future_exp()), &secret(SECRET)).expect("sign");
         let app =
             Router::new()
                 .route(
@@ -704,7 +733,7 @@ mod tests {
                         claims.sub.to_string()
                     }),
                 )
-                .layer(jwt_auth::<TestClaims>(SECRET.to_string()));
+                .layer(jwt_auth::<TestClaims>(secret(SECRET)));
 
         let (status, response) = drive(app, req_with_bearer(Some(&token))).await;
         assert_eq!(status, StatusCode::OK);
@@ -742,5 +771,36 @@ mod tests {
         // A present but invalid token is a failure, not an anonymous request.
         let (status, _) = drive(app(), req_with_bearer(Some("garbage"))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn key_ring_debug_redacts_the_secrets() {
+        let ring = KeyRing {
+            primary: secret("super-secret-value"),
+            previous: vec![secret("retired-secret-value")],
+        };
+        let printed = format!("{ring:?}");
+
+        assert!(!printed.contains("super-secret-value"), "{printed}");
+        assert!(!printed.contains("retired-secret-value"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+    }
+
+    #[test]
+    fn exp_is_required_even_with_an_empty_required_spec_claims() {
+        let verifier = JwtVerifier::new(
+            JwtConfig {
+                required_spec_claims: Vec::new(),
+                ..JwtConfig::default()
+            },
+            KeyRing::new(secret(SECRET)),
+        );
+
+        // A token without `exp` must not verify: the required-claims list can
+        // add checks, never drop the expiry requirement.
+        let token = verifier
+            .encode(&serde_json::json!({ "sub": 1 }))
+            .expect("sign");
+        assert!(verifier.decode::<serde_json::Value>(&token).is_err());
     }
 }

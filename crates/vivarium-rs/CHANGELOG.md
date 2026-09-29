@@ -4,6 +4,22 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Re-exports of `Secret`, `Ttl`, `Digest`, `SecretError`, `TtlError`,
+  `DigestError`, `SessionIdError` and `Argon2ParamsError` from
+  `vivarium-web`.
+
+### Breaking
+
+- The re-exported authentication surface follows `vivarium-web`'s checked
+  construction: `KeyRing`, `sign_token`, `decode_token` and `jwt_auth` take a
+  `Secret`, `RefreshTokenManager::new` / `SessionAuth::new` take `Ttl` values,
+  and `SessionStore` / `RefreshTokenStore` take `&Digest`. See
+  `vivarium-web`'s changelog for the full list.
+
 ## 0.3.4 — 2026-09-14
 
 ### Changed

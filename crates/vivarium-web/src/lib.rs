@@ -80,15 +80,15 @@ pub use cache::CacheControl;
 pub use error::{ApiError, ErrorKind, Result, debug_mode, install_debug_mode};
 pub use jwt::{JwtConfig, JwtVerifier, KeyRing};
 pub use password::{
-    Argon2Params, VerifyOutcome, hash, hash_with, needs_rehash, verify, verify_and_upgrade,
-    verify_login,
+    Argon2Params, Argon2ParamsError, VerifyOutcome, hash, hash_with, needs_rehash, verify,
+    verify_and_upgrade, verify_login,
 };
 pub use response::ApiResponse;
-pub use secrets::hash_token;
+pub use secrets::{Digest, DigestError, Secret, SecretError, Ttl, TtlError, hash_token};
 pub use serve::{serve_with_shutdown, shutdown_signal};
 pub use session::{
-    CookieOptions, OptionalSessionCtx, SameSite, SessionAuth, SessionCtx, SessionId, SessionRecord,
-    SessionStore, session_layer, should_extend,
+    CookieOptions, OptionalSessionCtx, SameSite, SessionAuth, SessionCtx, SessionId,
+    SessionIdError, SessionRecord, SessionStore, session_layer, should_extend,
 };
 pub use texts::{Texts, install_texts, texts};
 pub use token::{
