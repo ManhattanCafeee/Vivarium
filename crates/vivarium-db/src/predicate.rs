@@ -35,7 +35,7 @@
 
 use vivarium_core::{Column, Value};
 
-use crate::{DriverOps, Step};
+use crate::{DriverOps, Error, Step};
 
 /// The escape character used by the value-building helpers
 /// ([`starts_with`][Predicate::starts_with] and friends). `!` is used instead
@@ -62,11 +62,14 @@ pub enum Predicate<C: Column> {
     Like(C, String),
     /// `col NOT LIKE pattern`; wildcards in `pattern` stay active.
     NotLike(C, String),
-    /// `col LIKE 'value%'`, with `%`/`_` inside `value` treated literally.
+    /// `col LIKE 'value%'`, with `%`/`_` inside `value` treated literally; an
+    /// empty `value` matches every non-`NULL` row (`col IS NOT NULL`).
     StartsWith(C, String),
-    /// `col LIKE '%value'`, with `%`/`_` inside `value` treated literally.
+    /// `col LIKE '%value'`, with `%`/`_` inside `value` treated literally; an
+    /// empty `value` matches every non-`NULL` row (`col IS NOT NULL`).
     EndsWith(C, String),
-    /// `col LIKE '%value%'`, with `%`/`_` inside `value` treated literally.
+    /// `col LIKE '%value%'`, with `%`/`_` inside `value` treated literally; an
+    /// empty `value` matches every non-`NULL` row (`col IS NOT NULL`).
     Contains(C, String),
     /// `col IN (…)`; an empty list matches nothing (`1 = 0`).
     In(C, Vec<Value>),
@@ -128,20 +131,83 @@ impl<C: Column> Predicate<C> {
 
     /// `col LIKE 'value%'`; `%`, `_`, and `!` inside `value` are matched
     /// literally.
+    ///
+    /// An empty `value` matches every non-`NULL` row — the predicate renders
+    /// `col IS NOT NULL`; use [`try_starts_with`](Self::try_starts_with) to
+    /// reject a blank search term instead.
     pub fn starts_with(col: C, value: impl Into<String>) -> Self {
         Self::StartsWith(col, value.into())
     }
 
+    /// Like [`starts_with`](Self::starts_with), but rejects a blank value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`sqlx::Error::Protocol`] when `value` is empty or
+    /// whitespace-only: `LIKE '%'` would otherwise widen the filter to every
+    /// non-`NULL` row.
+    pub fn try_starts_with(col: C, value: impl Into<String>) -> Result<Self, Error> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(Error::Protocol(
+                "a LIKE search value must not be blank".to_owned(),
+            ));
+        }
+        Ok(Self::StartsWith(col, value))
+    }
+
     /// `col LIKE '%value'`; `%`, `_`, and `!` inside `value` are matched
     /// literally.
+    ///
+    /// An empty `value` matches every non-`NULL` row — the predicate renders
+    /// `col IS NOT NULL`; use [`try_ends_with`](Self::try_ends_with) to
+    /// reject a blank search term instead.
     pub fn ends_with(col: C, value: impl Into<String>) -> Self {
         Self::EndsWith(col, value.into())
     }
 
+    /// Like [`ends_with`](Self::ends_with), but rejects a blank value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`sqlx::Error::Protocol`] when `value` is empty or
+    /// whitespace-only: `LIKE '%'` would otherwise widen the filter to every
+    /// non-`NULL` row.
+    pub fn try_ends_with(col: C, value: impl Into<String>) -> Result<Self, Error> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(Error::Protocol(
+                "a LIKE search value must not be blank".to_owned(),
+            ));
+        }
+        Ok(Self::EndsWith(col, value))
+    }
+
     /// `col LIKE '%value%'`; `%`, `_`, and `!` inside `value` are matched
     /// literally.
+    ///
+    /// An empty `value` matches every non-`NULL` row — the predicate renders
+    /// `col IS NOT NULL`; use [`try_contains`](Self::try_contains) to reject
+    /// a blank search term instead.
     pub fn contains(col: C, value: impl Into<String>) -> Self {
         Self::Contains(col, value.into())
+    }
+
+    /// Like [`contains`](Self::contains), but rejects a blank value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`sqlx::Error::Protocol`] when `value` is empty or
+    /// whitespace-only: `LIKE '%%'` would otherwise widen the filter to every
+    /// non-`NULL` row.
+    pub fn try_contains(col: C, value: impl Into<String>) -> Result<Self, Error> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(Error::Protocol(
+                "a LIKE search value must not be blank".to_owned(),
+            ));
+        }
+        Ok(Self::Contains(col, value))
     }
 
     /// `col IN (…)`.
@@ -200,19 +266,13 @@ impl<C: Column> Predicate<C> {
             Self::Like(col, pattern) => pattern_step::<DB, C>(steps, col, pattern, false),
             Self::NotLike(col, pattern) => pattern_step::<DB, C>(steps, col, pattern, true),
             Self::StartsWith(col, value) => {
-                let pattern = format!("{}%", escape_like(value));
-                pattern_step::<DB, C>(steps, col, &pattern, false);
-                steps.push(Step::Text(format!(" ESCAPE '{LIKE_ESCAPE}'")));
+                needle_step::<DB, C>(steps, col, value, |value| format!("{value}%"));
             }
             Self::EndsWith(col, value) => {
-                let pattern = format!("%{}", escape_like(value));
-                pattern_step::<DB, C>(steps, col, &pattern, false);
-                steps.push(Step::Text(format!(" ESCAPE '{LIKE_ESCAPE}'")));
+                needle_step::<DB, C>(steps, col, value, |value| format!("%{value}"));
             }
             Self::Contains(col, value) => {
-                let pattern = format!("%{}%", escape_like(value));
-                pattern_step::<DB, C>(steps, col, &pattern, false);
-                steps.push(Step::Text(format!(" ESCAPE '{LIKE_ESCAPE}'")));
+                needle_step::<DB, C>(steps, col, value, |value| format!("%{value}%"));
             }
             Self::In(col, values) => list::<DB, C>(steps, col, values, "IN"),
             Self::NotIn(col, values) => list::<DB, C>(steps, col, values, "NOT IN"),
@@ -258,6 +318,27 @@ fn pattern_step<DB: DriverOps, C: Column>(
         DB::quote_ident(col.name())
     )));
     steps.push(Step::Bind(Value::Text(pattern.to_owned())));
+}
+
+/// Renders `col LIKE <pattern> ESCAPE '!'` for `value`, or `col IS NOT NULL`
+/// when `value` is empty: the wildcard pattern `%`/`%%` matches every
+/// non-`NULL` value, so the fold says the same thing — the same
+/// constant-folding `In([])`/`And([])` get.
+fn needle_step<DB: DriverOps, C: Column>(
+    steps: &mut Vec<Step>,
+    col: &C,
+    value: &str,
+    pattern: impl FnOnce(&str) -> String,
+) {
+    if value.is_empty() {
+        steps.push(Step::Text(format!(
+            "{} IS NOT NULL",
+            DB::quote_ident(col.name())
+        )));
+        return;
+    }
+    pattern_step::<DB, C>(steps, col, &pattern(&escape_like(value)), false);
+    steps.push(Step::Text(format!(" ESCAPE '{LIKE_ESCAPE}'")));
 }
 
 /// Renders `col [NOT] IN (…)`, degrading to a constant for empty lists.

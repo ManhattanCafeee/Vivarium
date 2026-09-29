@@ -6,7 +6,8 @@
 use serde_json::json;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use vivarium_db::{
-    Column, Order, Pagination, Predicate, Query, RawFragment, Sorter, Value, create,
+    Column, Order, Pagination, Predicate, Query, RawFragment, RawFragmentError, Sorter, Value,
+    create,
 };
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, vivarium_db::Entity)]
@@ -248,6 +249,28 @@ async fn filter_executes_eq_in_and_null_checks() {
         .await
         .expect("count");
     assert_eq!(not_null, 2);
+}
+
+#[tokio::test]
+async fn blank_needle_matches_every_non_null_row() {
+    let pool = pool().await;
+    let with_email = create(&pool, user_with_email("ada", 1, Some("ada@example.com")))
+        .await
+        .expect("seed");
+    let without_email = create(&pool, user_with_email("grace", 2, None))
+        .await
+        .expect("seed");
+
+    // An empty needle folds to `IS NOT NULL`, so the row whose email is NULL
+    // is not matched.
+    let rows = Query::<_, User>::new()
+        .filter(Predicate::contains(UserCol::Email, ""))
+        .find(&pool)
+        .await
+        .expect("find");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, with_email);
+    assert_ne!(rows[0].id, without_email);
 }
 
 #[tokio::test]
@@ -526,13 +549,61 @@ fn predicate_sql_pins_empty_lists_and_like_escape() {
         sql(Predicate::one_of(UserCol::Age, [1_i64, 2])),
         "SELECT * FROM \"users\" WHERE \"age\" IN (?, ?)"
     );
+
+    // An empty needle folds to `IS NOT NULL`: `LIKE '%'` (or `'%%'`) matches
+    // exactly the non-NULL values.
+    assert_eq!(
+        sql(Predicate::contains(UserCol::Email, "")),
+        "SELECT * FROM \"users\" WHERE \"email\" IS NOT NULL"
+    );
+    assert_eq!(
+        sql(Predicate::starts_with(UserCol::Email, "")),
+        "SELECT * FROM \"users\" WHERE \"email\" IS NOT NULL"
+    );
+    assert_eq!(
+        sql(Predicate::ends_with(UserCol::Email, "")),
+        "SELECT * FROM \"users\" WHERE \"email\" IS NOT NULL"
+    );
+
+    // The fallible twins reject a blank search term and otherwise build the
+    // same predicate as their infallible siblings.
+    assert!(matches!(
+        Predicate::try_contains(UserCol::Email, " "),
+        Err(vivarium_db::Error::Protocol(_))
+    ));
+    assert!(matches!(
+        Predicate::try_starts_with(UserCol::Email, ""),
+        Err(vivarium_db::Error::Protocol(_))
+    ));
+    assert!(matches!(
+        Predicate::try_ends_with(UserCol::Email, "\t"),
+        Err(vivarium_db::Error::Protocol(_))
+    ));
+    assert_eq!(
+        Predicate::try_contains(UserCol::Email, "x").expect("non-blank"),
+        Predicate::contains(UserCol::Email, "x")
+    );
+    assert_eq!(
+        Predicate::try_starts_with(UserCol::Name, "x").expect("non-blank"),
+        Predicate::starts_with(UserCol::Name, "x")
+    );
+    assert_eq!(
+        Predicate::try_ends_with(UserCol::Name, "x").expect("non-blank"),
+        Predicate::ends_with(UserCol::Name, "x")
+    );
 }
 
 #[test]
 fn raw_fragment_rejects_bind_count_mismatch() {
     let missing = RawFragment::new("age > ? AND name = ?", vec![Value::I64(1)])
         .expect_err("two placeholders, one bind");
-    assert_eq!((missing.placeholders(), missing.binds()), (2, 1));
+    assert_eq!(
+        missing,
+        RawFragmentError::Mismatch {
+            placeholders: 2,
+            binds: 1,
+        }
+    );
     assert!(
         missing
             .to_string()
@@ -541,12 +612,35 @@ fn raw_fragment_rejects_bind_count_mismatch() {
 
     let extra = RawFragment::new("age > ?", vec![Value::I64(1), Value::I64(2)])
         .expect_err("one placeholder, two binds");
-    assert_eq!((extra.placeholders(), extra.binds()), (1, 2));
+    assert_eq!(
+        extra,
+        RawFragmentError::Mismatch {
+            placeholders: 1,
+            binds: 2,
+        }
+    );
 
     let sql = Query::<sqlx::Sqlite, User>::new()
         .raw_where(RawFragment::new("age > ?", vec![Value::I64(0)]).expect("counts match"))
         .sql();
     assert_eq!(sql, "SELECT * FROM \"users\" WHERE (age > ?)");
+}
+
+#[test]
+fn raw_fragment_rejects_blank_sql() {
+    for sql in ["", "   ", "\n\t"] {
+        assert_eq!(
+            RawFragment::new(sql, Vec::new()),
+            Err(RawFragmentError::Empty),
+            "{sql:?}"
+        );
+    }
+    assert_eq!(
+        RawFragment::new("", Vec::new())
+            .expect_err("blank")
+            .to_string(),
+        "raw fragment SQL text must not be blank"
+    );
 }
 
 #[cfg(feature = "postgres")]

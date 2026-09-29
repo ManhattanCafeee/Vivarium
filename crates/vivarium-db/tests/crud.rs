@@ -362,3 +362,49 @@ async fn create_with_an_out_of_range_u64_field_writes_nothing() {
     assert!(matches!(error, sqlx::Error::Encode(_)), "got {error:?}");
     assert_eq!(count::<HitRow, _>(&pool).await.expect("count"), 0);
 }
+
+/// An entity whose only mapped column is its database-generated id: the
+/// `INSERT INTO t () VALUES ()` that `create` would otherwise build is invalid
+/// on PostgreSQL and SQLite.
+#[derive(Debug, vivarium_db::Entity)]
+#[entity(table = "only_ids", crate = "vivarium_db")]
+struct OnlyId {
+    id: i64,
+}
+
+#[tokio::test]
+async fn create_rejects_an_entity_with_no_insertable_columns() {
+    let pool = pool().await;
+
+    // No `only_ids` table is created: the guard must fire before any statement
+    // runs, so a regression would surface as a database error instead.
+    match create::<OnlyId, _>(&pool, OnlyId { id: 0 }).await {
+        Err(sqlx::Error::Protocol(message)) => {
+            assert_eq!(message, "entity has no insertable columns");
+        }
+        other => panic!("expected a protocol error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_helpers_reject_an_unset_key() {
+    let pool = pool().await;
+    let unset_message = "primary key is unset; only `create` accepts an unset key";
+
+    let errors = [
+        find_by_id::<User, _>(&pool, 0)
+            .await
+            .expect_err("unset key"),
+        delete::<User, _>(&pool, 0).await.expect_err("unset key"),
+        exists::<User, _>(&pool, 0).await.expect_err("unset key"),
+        update_by_id(&pool, 0, new_user("ada", 1, true))
+            .await
+            .expect_err("unset key"),
+    ];
+    for error in errors {
+        match error {
+            sqlx::Error::Protocol(message) => assert_eq!(message, unset_message),
+            other => panic!("expected a protocol error, got {other:?}"),
+        }
+    }
+}

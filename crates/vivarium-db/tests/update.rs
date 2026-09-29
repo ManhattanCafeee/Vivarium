@@ -139,3 +139,19 @@ async fn update_without_any_set_is_a_protocol_error() {
         other => panic!("expected a protocol error, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn update_rejects_an_unset_key() {
+    let pool = pool().await;
+    match Update::<Item, ItemCol>::new(0)
+        .set(ItemCol::Qty, 1_i32)
+        .execute(&pool)
+        .await
+    {
+        Err(sqlx::Error::Protocol(message)) => assert_eq!(
+            message,
+            "primary key is unset; only `create` accepts an unset key"
+        ),
+        other => panic!("expected a protocol error, got {other:?}"),
+    }
+}

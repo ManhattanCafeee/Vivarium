@@ -13,6 +13,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Pagination::normalize` — the field types clamp at construction, so the
   pagination a caller passes in is already normalized.
 
+### Breaking
+
+- `RawFragmentError` is an enum now — `Empty` (an empty or whitespace-only
+  SQL text, which used to render `WHERE ()`) and
+  `Mismatch { placeholders, binds }`. The `placeholders()`/`binds()`
+  accessors are gone; match the variants.
+- `Predicate::try_starts_with`/`try_ends_with`/`try_contains` are new: they
+  reject a blank search value with `sqlx::Error::Protocol` instead of widening
+  the filter to every non-`NULL` row.
+
+### Fixed
+
+- `create` rejects an entity with no insertable columns (a database-generated
+  id and `#[entity(skip)]` on every other field) instead of building
+  `INSERT INTO t () VALUES ()` — a syntax error on PostgreSQL and SQLite
+  (MySQL inserted a default row).
+- `find_by_id`, `delete`, `exists`, `update_by_id` and `Update::execute`
+  reject an unset primary key (`0` / `""`) with `sqlx::Error::Protocol`
+  instead of silently matching nothing — or the row that really carries the
+  sentinel.
+- `RawFragment::new` rejects an empty or whitespace-only SQL text.
+- `Predicate::starts_with`/`ends_with`/`contains` fold an empty value to
+  `col IS NOT NULL`: the same rows as `LIKE '%'`, stated as a predicate
+  instead of a wildcard pattern, and now documented and tested like the
+  `In([])`/`And([])` folds.
+
 ## 0.3.4 — 2026-09-14
 
 ### Fixed

@@ -3,7 +3,7 @@
 #![cfg(feature = "sqlite")]
 
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
-use vivarium_db::{count, create, find_by_id};
+use vivarium_db::{count, create, delete, find_by_id};
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, vivarium_db::Entity)]
 #[entity(table = "auto_rows", crate = "vivarium_db")]
@@ -186,4 +186,25 @@ async fn unset_string_key_is_rejected_with_a_clean_message() {
 
     // The check runs before the statement, so nothing was inserted.
     assert_eq!(count::<Token, _>(&pool).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn string_key_sentinel_is_rejected_by_read_helpers() {
+    let pool = pool().await;
+    let unset_message = "primary key is unset; only `create` accepts an unset key";
+
+    let errors = [
+        find_by_id::<Token, _>(&pool, String::new())
+            .await
+            .expect_err("unset key"),
+        delete::<Token, _>(&pool, String::new())
+            .await
+            .expect_err("unset key"),
+    ];
+    for error in errors {
+        match error {
+            sqlx::Error::Protocol(message) => assert_eq!(message, unset_message),
+            other => panic!("expected a protocol error, got {other:?}"),
+        }
+    }
 }

@@ -15,8 +15,17 @@ use vivarium_core::{Entity, PrimaryKey};
 
 use crate::{DriverOps, Error, Step, encode_error, key_error};
 
-/// Builds a bind step for a primary key.
-fn id_step(id: impl PrimaryKey) -> Result<Step, Error> {
+/// Builds a bind step for a primary key, rejecting an unset key.
+///
+/// `0` / `""` selects nothing — or a row that happens to carry the sentinel —
+/// and only [`create`] has a meaning for an unset key: the database assigns
+/// one there.
+pub(crate) fn id_step(id: impl PrimaryKey) -> Result<Step, Error> {
+    if id.is_unset() {
+        return Err(Error::Protocol(
+            "primary key is unset; only `create` accepts an unset key".to_owned(),
+        ));
+    }
     Ok(Step::Bind(id.into_value().map_err(key_error)?))
 }
 
@@ -47,6 +56,13 @@ where
 /// and the database assigns it (autoincrement / serial), and the generated
 /// value is converted back into `T::Id` through
 /// [`PrimaryKey::from_generated`].
+///
+/// # Errors
+///
+/// An entity with no insertable columns — its id is database-generated and
+/// every other column is `#[entity(skip)]` — is an [`Error::Protocol`]
+/// instead of an `INSERT INTO t () VALUES ()`, which is a syntax error on
+/// PostgreSQL and SQLite.
 pub async fn create<'q, T, DB>(
     db: impl Executor<'q, Database = DB> + 'q,
     entity: T,
@@ -73,6 +89,15 @@ where
     if let Some(id) = &provided {
         let value = id.clone().into_value().map_err(key_error)?;
         pairs.insert(0, (T::ID_COLUMN, value));
+    }
+    if pairs.is_empty() {
+        // The id is database-generated and every other column is skipped:
+        // `INSERT INTO t () VALUES ()` is a syntax error on PostgreSQL and
+        // SQLite (MySQL inserts a default row instead), so the shape is
+        // rejected here, like `update_by_id`'s empty `SET`.
+        return Err(Error::Protocol(
+            "entity has no insertable columns".to_owned(),
+        ));
     }
 
     let cols = pairs

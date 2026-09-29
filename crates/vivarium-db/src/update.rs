@@ -13,7 +13,7 @@
 use std::marker::PhantomData;
 
 use sqlx::Executor;
-use vivarium_core::{Column, Entity, PrimaryKey, Value};
+use vivarium_core::{Column, Entity, Value};
 
 use crate::{DriverOps, Error, Step};
 
@@ -114,7 +114,8 @@ impl<T: Entity, C: Column> Update<T, C> {
     ///
     /// Fails with [`sqlx::Error::Protocol`] when no column was set — an
     /// `UPDATE` with an empty `SET` list is invalid SQL, and silently doing
-    /// nothing would hide the mistake.
+    /// nothing would hide the mistake — or when the primary key is unset
+    /// (`0` / `""`), which would update nothing (or the wrong row).
     pub async fn execute<'e, DB, E>(self, db: E) -> Result<u64, Error>
     where
         DB: DriverOps,
@@ -123,7 +124,7 @@ impl<T: Entity, C: Column> Update<T, C> {
         if self.sets.is_empty() {
             return Err(Error::Protocol("Update has no columns to set".to_owned()));
         }
-        let id = self.id.into_value().map_err(crate::key_error)?;
+        let id_step = crate::crud::id_step(self.id)?;
 
         let mut clauses: Vec<Step> = Vec::new();
         for (i, (col, assigned)) in self.sets.iter().enumerate() {
@@ -140,7 +141,7 @@ impl<T: Entity, C: Column> Update<T, C> {
             " WHERE {} = ",
             DB::quote_ident(T::ID_COLUMN)
         )));
-        clauses.push(Step::Bind(id));
+        clauses.push(id_step);
 
         let prefix = format!("UPDATE {} SET ", DB::quote_ident(T::TABLE));
         DB::execute(prefix, clauses, String::new(), db).await

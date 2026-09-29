@@ -135,8 +135,9 @@ where
     ///
     /// The fragment's SQL text uses `?` for each bind, in order; the
     /// placeholders are rewritten to the driver's own syntax when the query
-    /// runs. `RawFragment::new` fails when the two counts disagree, so a
-    /// fragment can never bind the wrong number of values.
+    /// runs. `RawFragment::new` rejects a blank fragment and a placeholder /
+    /// bind count mismatch, so a fragment can never render an empty
+    /// `WHERE ()` or bind the wrong number of values.
     pub fn raw_where(mut self, fragment: RawFragment) -> Self {
         let prefix = if self.steps.is_empty() {
             " WHERE "
@@ -339,8 +340,8 @@ where
 /// A hand-written SQL fragment for [`Query::raw_where`].
 ///
 /// This is the explicit escape hatch of the query builder: the SQL text is
-/// yours, so nothing but the `?`/bind count is checked for you. Prefer
-/// [`Predicate`] whenever it can express the condition.
+/// yours, so nothing but the blank check and the `?`/bind count is verified
+/// for you. Prefer [`Predicate`] whenever it can express the condition.
 ///
 /// ```
 /// use vivarium_db::RawFragment;
@@ -356,8 +357,8 @@ pub struct RawFragment {
 }
 
 impl RawFragment {
-    /// Builds a fragment, checking that the number of `?` placeholders
-    /// matches the number of binds.
+    /// Builds a fragment, checking that it is not blank and that the number of
+    /// `?` placeholders matches the number of binds.
     ///
     /// `?` is reserved: every occurrence is treated as a placeholder, so a
     /// literal question mark (a `'a?b'` string literal, PostgreSQL's JSONB `?`
@@ -366,12 +367,17 @@ impl RawFragment {
     ///
     /// # Errors
     ///
-    /// Returns [`RawFragmentError`] when the counts differ.
+    /// Returns [`RawFragmentError::Empty`] when `sql` is empty or
+    /// whitespace-only (a blank fragment would render `WHERE ()`), and
+    /// [`RawFragmentError::Mismatch`] when the counts differ.
     pub fn new(sql: impl Into<String>, binds: Vec<Value>) -> Result<Self, RawFragmentError> {
         let sql = sql.into();
+        if sql.trim().is_empty() {
+            return Err(RawFragmentError::Empty);
+        }
         let placeholders = sql.matches('?').count();
         if placeholders != binds.len() {
-            return Err(RawFragmentError {
+            return Err(RawFragmentError::Mismatch {
                 placeholders,
                 binds: binds.len(),
             });
@@ -390,33 +396,32 @@ impl RawFragment {
     }
 }
 
-/// The error returned by [`RawFragment::new`] when the placeholder and bind
-/// counts disagree.
+/// The error returned by [`RawFragment::new`] for an unusable fragment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RawFragmentError {
-    placeholders: usize,
-    binds: usize,
-}
-
-impl RawFragmentError {
-    /// The number of `?` placeholders in the SQL text.
-    pub fn placeholders(&self) -> usize {
-        self.placeholders
-    }
-
-    /// The number of binds supplied.
-    pub fn binds(&self) -> usize {
-        self.binds
-    }
+pub enum RawFragmentError {
+    /// The SQL text is empty or whitespace-only.
+    Empty,
+    /// The `?` placeholder count and the bind count disagree.
+    Mismatch {
+        /// The number of `?` placeholders in the SQL text.
+        placeholders: usize,
+        /// The number of binds supplied.
+        binds: usize,
+    },
 }
 
 impl std::fmt::Display for RawFragmentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "raw fragment has {} `?` placeholders but {} binds",
-            self.placeholders, self.binds
-        )
+        match self {
+            Self::Empty => f.write_str("raw fragment SQL text must not be blank"),
+            Self::Mismatch {
+                placeholders,
+                binds,
+            } => write!(
+                f,
+                "raw fragment has {placeholders} `?` placeholders but {binds} binds"
+            ),
+        }
     }
 }
 
