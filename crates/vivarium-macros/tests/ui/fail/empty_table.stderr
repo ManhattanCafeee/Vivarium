@@ -1,0 +1,5 @@
+error: `#[entity(table = "...")]` must not be blank
+ --> tests/ui/fail/empty_table.rs:5:43
+  |
+5 | #[entity(crate = "vivarium_core", table = "")]
+  |                                           ^^

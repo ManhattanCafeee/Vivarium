@@ -1,0 +1,5 @@
+error: #[derive(Entity)] produced the duplicate column `id`; column names must be unique (change a field name or `rename` value)
+ --> tests/ui/fail/duplicate_column.rs:9:23
+  |
+9 |     #[entity(rename = "id")]
+  |                       ^^^^

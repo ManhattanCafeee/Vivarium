@@ -1,0 +1,5 @@
+error: `#[entity(rename = "...")]` must not be blank
+ --> tests/ui/fail/empty_rename.rs:9:23
+  |
+9 |     #[entity(rename = "  ")]
+  |                       ^^^^

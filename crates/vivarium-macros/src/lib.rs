@@ -209,6 +209,12 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
     };
     let id_ident = id_field.ident.as_ref().expect("named field");
 
+    // Column names must be unique: two fields renamed to the same column (or a
+    // non-id field renamed onto the id column) would build `INSERT INTO
+    // t ("id", "id") …` and `SET "id" = …, "id" = …` statements that fail only
+    // at run time, and only on the paths that supply an id.
+    let mut columns: Vec<(String, proc_macro2::Span)> =
+        vec![(id_col_lit.value(), id_col_lit.span())];
     let mut column_pushes = Vec::new();
     for field in fields {
         let ident = field.ident.as_ref().expect("named field");
@@ -218,7 +224,19 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
         }
         let col_lit = attrs
             .rename
+            .clone()
             .unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
+        let column = col_lit.value();
+        if columns.iter().any(|(seen, _)| *seen == column) {
+            return Err(Error::new(
+                col_lit.span(),
+                format!(
+                    "#[derive(Entity)] produced the duplicate column `{column}`; \
+                     column names must be unique (change a field name or `rename` value)"
+                ),
+            ));
+        }
+        columns.push((column, col_lit.span()));
         let value = value_expr(field, &quote!(self.#ident), attrs.json, &col_lit, &anchor)?;
         column_pushes.push(quote! {
             out.push((#col_lit, #value));
@@ -532,6 +550,12 @@ impl EntityAttrs {
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("table") {
                     let lit: LitStr = meta.value()?.parse()?;
+                    if lit.value().trim().is_empty() {
+                        return Err(Error::new(
+                            lit.span(),
+                            "`#[entity(table = \"...\")]` must not be blank",
+                        ));
+                    }
                     table = Some(lit);
                     Ok(())
                 } else if meta.path.is_ident("crate") {
@@ -577,6 +601,12 @@ impl FieldAttrs {
                     Ok(())
                 } else if meta.path.is_ident("rename") {
                     let lit: LitStr = meta.value()?.parse()?;
+                    if lit.value().trim().is_empty() {
+                        return Err(Error::new(
+                            lit.span(),
+                            "`#[entity(rename = \"...\")]` must not be blank",
+                        ));
+                    }
                     parsed.rename = Some(lit);
                     Ok(())
                 } else {

@@ -4,6 +4,19 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- `#[entity(table = "...")]` and `#[entity(rename = "...")]` reject an empty or
+  whitespace-only literal instead of naming a table or a column `""`, which
+  reached SQL as `SELECT * FROM ""`.
+- `#[derive(Entity)]` rejects duplicate column names — two fields renamed onto
+  the same column, or a non-id field renamed onto the id column — at compile
+  time. They used to build `INSERT INTO t ("id", "id") …` and
+  `SET "id" = …, "id" = …`, which failed only at run time and only on the
+  paths that supply an id.
+
 ## 0.3.4 — 2026-09-14
 
 ### Changed
